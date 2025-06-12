@@ -1,9 +1,9 @@
-from django.contrib.auth.password_validation import validate_password
 import shortuuid
 from decouple import config
+from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.mail import send_mail
-from rest_framework import generics, serializers, status
+from rest_framework import generics, permissions, serializers, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -12,12 +12,21 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import User
 from .permissions import IsDonoOrAdm
 from .serializers import (MyTokenObtainPairSerializer, PasswordResetSerializer,
-                          RegisterUserSerializer, UserSerializer)
+                          RegisterUserSerializer, UserSerializer,
+                          UserUpdateSerializer)
 
 
 class UserView(generics.RetrieveAPIView):
     serializer_class = UserSerializer
     permission_classes = (IsAuthenticated, )
+
+    def get_object(self):
+        return self.request.user
+
+
+class UserUpdateView(generics.UpdateAPIView):
+    serializer_class = UserUpdateSerializer
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_object(self):
         return self.request.user

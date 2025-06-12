@@ -1,6 +1,6 @@
-from django.contrib.auth.password_validation import validate_password
 import shortuuid
 from decouple import config
+from django.contrib.auth.password_validation import validate_password
 from django.core.mail import send_mail
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -9,9 +9,33 @@ from .models import User
 
 
 class UserSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+    foto = serializers.ImageField(use_url=True)
+
     class Meta:
         model = User
-        fields = ['id', 'email', 'role', 'dono']
+        fields = [
+            'id',
+            'email',
+            'nome',
+            'sobrenome',
+            'foto',
+            'role',
+            'dono',
+            'otp',
+            'is_active',
+            'full_name',
+        ]
+        read_only_fields = ['otp', 'dono', 'role', 'is_active', 'full_name']
+
+    def get_full_name(self, obj):
+        return obj.get_full_name()
+
+
+class UserUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['nome', 'sobrenome', 'foto']
 
 
 class RegisterUserSerializer(serializers.ModelSerializer):

@@ -28,6 +28,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     )
 
     email = models.EmailField(unique=True)
+    nome = models.CharField(max_length=150, blank=True, null=True)
+    sobrenome = models.CharField(max_length=150, blank=True, null=True)
+    foto = models.ImageField(
+        upload_to='usuarios/fotos/', blank=True, null=True)
+
     role = models.CharField(
         max_length=10, choices=ROLE_CHOICES, default='comum')
     dono = models.ForeignKey("self", null=True, blank=True, on_delete=models.CASCADE,
@@ -44,4 +49,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     objects = UserManager()
 
     def __str__(self):
+        return self.get_full_name()
+
+    def get_full_name(self):
+        if self.nome:
+            return f"{self.nome} {self.sobrenome or ''}".strip()
         return self.email
