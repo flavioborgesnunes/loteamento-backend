@@ -3,6 +3,8 @@ from django.contrib.auth.models import (AbstractBaseUser, BaseUserManager,
                                         PermissionsMixin)
 from django.db import models
 
+from .mixins.file_cleanup_mixin import FileCleanupMixin
+
 
 class UserManager(BaseUserManager):
     def create_user(self, email, password=None, role='comum', dono=None, **extra_fields):
@@ -20,7 +22,7 @@ class UserManager(BaseUserManager):
         return self.create_user(email, password, role='dono', **extra_fields)
 
 
-class User(AbstractBaseUser, PermissionsMixin):
+class User(FileCleanupMixin, AbstractBaseUser, PermissionsMixin):
     ROLE_CHOICES = (
         ('dono', 'Dono'),
         ('adm', 'Administrador'),
