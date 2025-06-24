@@ -50,7 +50,9 @@ INSTALLED_APPS = [
     'drf_yasg',
 
     # Meus apps
+    'api',
     'userauth',
+    'ia',
 ]
 
 MIDDLEWARE = [
