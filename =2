@@ -1,0 +1,7 @@
+Collecting Shapely
+  Downloading shapely-2.1.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (6.7 kB)
+Requirement already satisfied: numpy>=1.21 in ./venv/lib/python3.10/site-packages (from Shapely) (2.2.6)
+Downloading shapely-2.1.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (3.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.1/3.1 MB 33.0 MB/s  0:00:00
+Installing collected packages: Shapely
+Successfully installed Shapely-2.1.1

@@ -1,6 +1,7 @@
 from django.urls import path
 from ia import views as ia_views
 from rest_framework_simplejwt.views import TokenRefreshView
+from rios import views as rios_views
 from userauth import views as userauths_views
 
 urlpatterns = [
@@ -17,4 +18,10 @@ urlpatterns = [
     # IA
     # path("openai/", ia_views.LegalQueryView.as_view(), name="openai_query"),
     path("autofill/", ia_views.LegalAutoFillView.as_view(), name="autofill"),
+
+    # Rios
+    path("rios/geojson/", rios_views.rios_geojson, name="rios-geojson"),
+    path("export/rios/", rios_views.export_rios_kmz, name="export-rios-kmz"),
+
+
 ]

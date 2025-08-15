@@ -48,11 +48,13 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'corsheaders',
     'drf_yasg',
+    'django.contrib.gis',
 
     # Meus apps
     'api',
     'userauth',
     'ia',
+    'rios',
 ]
 
 MIDDLEWARE = [
@@ -93,10 +95,21 @@ WSGI_APPLICATION = 'setup.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.sqlite3',
+#         'NAME': BASE_DIR / 'db.sqlite3',
+#     }
+# }
+
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.contrib.gis.db.backends.postgis',
+        'NAME': 'loteamento',
+        'USER': 'lotenet',
+        'PASSWORD': '314628',
+        'HOST': 'localhost',
+        'PORT': '5432',
     }
 }
 
@@ -154,6 +167,8 @@ CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS').split(',')
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 AUTH_USER_MODEL = 'userauth.User'
+
+GDAL_LIBRARY_PATH = "/usr/lib/x86_64-linux-gnu/libgdal.so.34"
 
 
 SIMPLE_JWT = {

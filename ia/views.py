@@ -1,6 +1,6 @@
 import tempfile
 
-import fitz  # PyMuPDF
+import fitz
 import requests
 import unidecode
 from bs4 import BeautifulSoup
