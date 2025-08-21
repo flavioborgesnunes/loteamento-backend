@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'userauth',
     'ia',
     'rios',
+    'geodata',
 ]
 
 MIDDLEWARE = [

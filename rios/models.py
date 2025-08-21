@@ -18,4 +18,3 @@ class Waterway(models.Model):
 
     def __str__(self):
         return self.name or f"Rio {self.pk}"
-        return self.name or f"Rio {self.pk}"
