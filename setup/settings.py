@@ -111,6 +111,15 @@ DATABASES = {
         'PASSWORD': '314628',
         'HOST': 'localhost',
         'PORT': '5432',
+        # mantém conexão viva entre requisições (ajuste se preferir)
+        "CONN_MAX_AGE": 60,
+        "OPTIONS": {
+            "sslmode": "require",
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        },
     }
 }
 

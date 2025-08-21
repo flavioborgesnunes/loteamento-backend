@@ -1,4 +1,5 @@
 from django.urls import path
+from geodata import views as geodata_views
 from ia import views as ia_views
 from rest_framework_simplejwt.views import TokenRefreshView
 from rios import views as rios_views
@@ -22,6 +23,11 @@ urlpatterns = [
     # Rios
     path("rios/geojson/", rios_views.rios_geojson, name="rios-geojson"),
     path("export/rios/", rios_views.export_rios_kmz, name="export-rios-kmz"),
+
+    # Geodata
+    path("export/mapa/", geodata_views.export_mapa_kmz,
+         name="export-mapa-kmz"),  # NOVO
+
 
 
 ]
