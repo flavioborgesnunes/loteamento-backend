@@ -34,6 +34,46 @@ from django.db import connection
 from django.db.utils import OperationalError
 
 
+def _safe_geos_from_geojson(geom_obj):
+    """
+    Converte um dict GeoJSON geometry em GEOSGeometry SRID=4326, validando.
+    """
+    if not geom_obj:
+        return None
+    g = GEOSGeometry(json.dumps(geom_obj))
+    if g.srid is None:
+        g.srid = 4326
+    if g.srid != 4326:
+        g.transform(4326)
+    if not g.valid:
+        try:
+            g = g.buffer(0)  # tentativa de "make valid"
+        except Exception:
+            pass
+    return g
+
+
+def _overlay_palette(idx):
+    """
+    Define um par (fill_color, line_color) para cada overlay.
+    Usa nomes suportados pelo simplekml.Color.
+    """
+    names = ["red", "orange", "yellow", "green",
+             "cyan", "blue", "purple", "white"]
+    name = names[idx % len(names)]
+    fill = _color_a(40, name)  # ~16% opaco
+    line = getattr(simplekml.Color, name, simplekml.Color.white)
+    return fill, line
+
+
+def _add_lines_to_kml(folder, geos_geom, line_color, name_prefix):
+    for ln in _extract_lines(geos_geom):
+        coords = [(float(x), float(y)) for (x, y) in ln.coords]
+        ls = folder.newlinestring(name=name_prefix, coords=coords)
+        ls.style.linestyle.width = 2
+        ls.style.linestyle.color = line_color
+
+
 def _yield_ids_in_batches(qs_ids, batch_size=2000):
     """
     Recebe um QuerySet de IDs (values_list(..., flat=True) + order_by('id')),
@@ -238,6 +278,11 @@ def export_mapa_kmz(request):
     ser = ExportMapaSerializer(data=request.data or {})
     ser.is_valid(raise_exception=True)
     data = ser.validated_data
+
+    overlays_fc = (request.data or {}).get("overlays")
+
+    if not overlays_fc:
+        overlays_fc = {"type": "FeatureCollection", "features": []}
 
     # AOI -> MultiPolygon SRID 4326
     try:
@@ -515,6 +560,84 @@ def export_mapa_kmz(request):
                     )
                     total += 1
 
+   # ------------ 6) Overlays (KMLs Secundários) ------------
+    # Preferência: overlays_raw (originais) -> se não vier, usa overlays (recortados no cliente)
+    overlays_raw_fc = (request.data or {}).get("overlays_raw")
+    overlays_fc = (request.data or {}).get("overlays")
+
+    # normaliza quando vier None
+    if not overlays_raw_fc:
+        overlays_raw_fc = {"type": "FeatureCollection", "features": []}
+    if not overlays_fc:
+        overlays_fc = {"type": "FeatureCollection", "features": []}
+
+    # Decide fonte: se houver algo cru, recorta no servidor; senão usa o já-recortado do cliente
+    src_fc = overlays_raw_fc if (
+        overlays_raw_fc.get("features") or []) else overlays_fc
+
+    if src_fc and isinstance(src_fc, dict) and src_fc.get("features"):
+        fld_over = kml.newfolder(name="Overlays (KMLs Secundários)")
+        feats = src_fc.get("features") or []
+
+        id_to_color = {}
+
+        for i, feat in enumerate(feats):
+            try:
+                props = (feat.get("properties") or {})
+                overlay_id = props.get("__overlay_id") or f"overlay_{i+1}"
+                if overlay_id not in id_to_color:
+                    idx = len(id_to_color)
+                    id_to_color[overlay_id] = _overlay_palette(idx)
+                fill_color, line_color = id_to_color[overlay_id]
+
+                g = _safe_geos_from_geojson(feat.get("geometry"))
+                if not g or g.empty:
+                    continue
+
+                # recorte no servidor (mesmo se o cliente já tiver recortado)
+                g_clip = g.intersection(aoi)
+                if not g_clip or g_clip.empty:
+                    continue
+
+                # simplifica conforme tipo
+                if g_clip.geom_type in ("Polygon", "MultiPolygon"):
+                    try:
+                        g_clip = g_clip.simplify(
+                            tol_pol, preserve_topology=True)
+                    except Exception:
+                        pass
+                    if g_clip.empty:
+                        continue
+                    gj = json.loads(g_clip.json)
+                    _add_polygons_to_kml(
+                        folder=fld_over,
+                        gj_geom=gj,
+                        fill_color=fill_color,
+                        line_color=line_color,
+                        name_prefix=str(overlay_id),
+                    )
+                    total += 1
+
+                elif g_clip.geom_type in ("LineString", "MultiLineString", "GeometryCollection"):
+                    try:
+                        g_clip_simpl = g_clip.simplify(
+                            tol_lt, preserve_topology=True)
+                    except Exception:
+                        g_clip_simpl = g_clip
+                    _add_lines_to_kml(
+                        folder=fld_over,
+                        geos_geom=g_clip_simpl,
+                        line_color=line_color,
+                        name_prefix=str(overlay_id),
+                    )
+                    total += 1
+
+                # ignora Point/MultiPoint
+
+            except Exception:
+                # não derruba a exportação por 1 feature ruim
+                continue
+
     # Se nenhuma feição (além da AOI) foi encontrada e alguma camada foi pedida → 204
     if total == 0 and (want_rios or want_lt or want_cidades or want_lim_fed or want_areas_est):
         return Response(status=204)
@@ -545,4 +668,5 @@ def export_mapa_kmz(request):
     resp = HttpResponse(
         kmz_bytes.read(), content_type="application/vnd.google-earth.kmz")
     resp["Content-Disposition"] = 'attachment; filename="mapa_recorte.kmz"'
+    return resp
     return resp

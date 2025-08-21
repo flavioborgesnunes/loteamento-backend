@@ -24,4 +24,6 @@ class ExportMapaSerializer(serializers.Serializer):
 
     # Força KML puro (senão KMZ)
     format = serializers.ChoiceField(choices=["kml", "kmz"], required=False)
-    format = serializers.ChoiceField(choices=["kml", "kmz"], required=False)
+    overlays = serializers.JSONField(required=False)
+
+    overlays_raw = serializers.JSONField(required=False)
