@@ -161,6 +161,7 @@ ALIASES = {
     "cidades": "geodata_cidade",
     "cidade": "geodata_cidade",
     "lt": "geodata_linhatransmissao",
+    "malha_ferroviaria": "geodata_malha_ferroviaria",
     "linhas": "geodata_linhatransmissao",
     "linhas_transmissao": "geodata_linhatransmissao",
     "limites": "geodata_limitefederal",
@@ -197,7 +198,9 @@ class Command(BaseCommand):
         # detecta tipo por tabela
         target_is_polygon = any(key in table for key in [
                                 "_area", "_cidade", "_limitefederal"])
-        target_is_lines = "_linhatransmissao" in table
+        target_is_lines = any(key in table for key in [
+                              "_linhatransmissao", "_malha_ferroviaria", "_ferrovia"])
+
         if not (target_is_polygon or target_is_lines):
             raise CommandError(
                 f'Tabela "{table}" não reconhecida para tipo geométrico.')

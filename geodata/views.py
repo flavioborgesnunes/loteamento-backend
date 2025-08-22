@@ -1,4 +1,5 @@
-# rios/views.py (adicione os imports que faltarem)
+# rios/views.py
+
 import io
 import json
 import zipfile
@@ -9,17 +10,21 @@ from django.contrib.gis.db.models.functions import (AsGeoJSON, Intersection,
                                                     MakeValid)
 from django.contrib.gis.geos import GEOSGeometry, MultiPolygon
 from django.contrib.gis.geos import Polygon as GEOSPolygon
+from django.db import connection
 from django.db.models import F, Func, Value
+from django.db.utils import OperationalError
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from geodata.models import (Area, Cidade,  # ajuste o app se necessário
-                            LimiteFederal, LinhaTransmissao)
+from geodata.models import (Area, Cidade, LimiteFederal, LinhaTransmissao,
+                            MalhaFerroviaria)
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
-from rios.models import Waterway  # rios
+# MODELS
+from rios.models import Waterway
 
+# SERIALIZERS
 from .serializers import ExportMapaSerializer
 
 try:
@@ -29,10 +34,6 @@ except ImportError:
 
 
 # ============================ Helpers comuns ============================
-
-from django.db import connection
-from django.db.utils import OperationalError
-
 
 def _safe_geos_from_geojson(geom_obj):
     """
@@ -96,7 +97,6 @@ def _refresh_conn():
     try:
         connection.close_if_unusable_or_obsolete()
     except Exception:
-        # Em último caso, força fechar
         try:
             connection.close()
         except Exception:
@@ -207,12 +207,10 @@ def _add_polygons_to_kml(folder, gj_geom, fill_color, line_color, name_prefix):
             add_polygon(coords, f"{name_prefix} {i}")
 
 
-def _color_a(alpha_int, rgb_hex):
-    """ simplekml: monta cor ARGB usando helper """
+def _color_a(alpha_int, rgb_hex_or_name):
+    """Monta cor ARGB usando helper do simplekml."""
     from simplekml import Color
-
-    # Color no simplekml é AABBGGRR; usaremos helper changealphaint com uma base
-    base = getattr(Color, rgb_hex, Color.white)
+    base = getattr(Color, rgb_hex_or_name, Color.white)
     return Color.changealphaint(alpha_int, base)
 
 
@@ -243,8 +241,8 @@ def _annotate_clip_simplify(qs, geom_expr, tol):
     )
     return qs
 
-# ============================ Endpoint unificado ============================
 
+# ============================ Endpoint unificado ============================
 
 @csrf_exempt
 @api_view(["POST"])
@@ -258,31 +256,31 @@ def export_mapa_kmz(request):
       "layers": {
         "rios": true|false,
         "lt": true|false,
+        "mf": true|false,
         "cidades": true|false,
         "limites_federais": true|false,
         "areas_estaduais": true|false
       },
-      "uf": "SC",              # opcional (aplica em Area.uf; Cidade não tem UF na model fornecida)
+      "uf": "SC",              # opcional (filtra Area.uf)
       "simplify": {            # opcional (defaults)
         "rios": 0.00002,
         "lt": 0.00002,
+        "mf": 0.00002,
         "polygons": 0.00005
       },
-      "format": "kml"|"kmz"    # default: kmz
+      "format": "kml"|"kmz",   # default: kmz
+      "overlays": {...},       # FeatureCollection opcional (já-recortado no cliente)
+      "overlays_raw": {...}    # FeatureCollection opcional (cru, recorta no servidor)
     }
     """
     if simplekml is None:
         return Response({"detail": "simplekml não instalado."},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    # valida payload básico
     ser = ExportMapaSerializer(data=request.data or {})
     ser.is_valid(raise_exception=True)
     data = ser.validated_data
-
-    overlays_fc = (request.data or {}).get("overlays")
-
-    if not overlays_fc:
-        overlays_fc = {"type": "FeatureCollection", "features": []}
 
     # AOI -> MultiPolygon SRID 4326
     try:
@@ -292,38 +290,49 @@ def export_mapa_kmz(request):
     except Exception as e:
         return Response({"detail": f"AOI inválida: {e}"}, status=400)
 
+    # flags de camadas
     layers = (data.get("layers") or {})
     want_rios = bool(layers.get("rios"))
     want_lt = bool(layers.get("lt"))
+    want_mf = bool(layers.get("mf"))
     want_cidades = bool(layers.get("cidades"))
     want_lim_fed = bool(layers.get("limites_federais"))
     want_areas_est = bool(layers.get("areas_estaduais"))
 
     uf = (data.get("uf") or "") or None
 
+    # tolerâncias
     simp = data.get("simplify") or {}
     tol_rios = float(simp.get("rios", 0.00002))
-    tol_lt = float(simp.get("lt", 0.00002))
+    tol_lt = float(simp.get("lt",   0.00002))
+    tol_mf = float(simp.get("mf",   0.00002))
     tol_pol = float(simp.get("polygons", 0.00005))
 
     out_format = (data.get("format") or "kmz").lower()
+
+    # Overlays opcionais vindos do cliente
+    overlays_raw_fc = (request.data or {}).get("overlays_raw") or {
+        "type": "FeatureCollection", "features": []}
+    overlays_fc = (request.data or {}).get("overlays") or {
+        "type": "FeatureCollection", "features": []}
 
     # ---------- KML base ----------
     kml = simplekml.Kml()
     fld_aoi = kml.newfolder(name="AOI")
     fld_rios = kml.newfolder(name="Rios")
     fld_lt = kml.newfolder(name="Linhas de Transmissão")
+    fld_mf = kml.newfolder(name="Malha Ferroviária")
     fld_cidades = kml.newfolder(name="Cidades")
     fld_fed = kml.newfolder(name="Áreas Federais")
     fld_est = kml.newfolder(name="Áreas Estaduais")
 
-    # AOI (apenas para referência visual)
+    # AOI (referência visual)
     try:
         aoi_gj = json.loads(aoi.json)
         _add_polygons_to_kml(
             folder=fld_aoi,
             gj_geom=aoi_gj,
-            fill_color=_color_a(60, "cyan"),     # ~24% opaco
+            fill_color=_color_a(60, "cyan"),
             line_color=simplekml.Color.cyan,
             name_prefix="AOI"
         )
@@ -332,16 +341,14 @@ def export_mapa_kmz(request):
 
     total = 0
 
-   # ---------- 1) Rios (linhas) ----------
+    # ---------- 1) Rios (linhas) ----------
     if want_rios:
-        # 1a. Pegue IDs que intersectam (barato)
         ids_qs = (
             Waterway.objects
             .filter(geom__intersects=aoi)
             .order_by('id')
             .values_list('id', flat=True)
         )
-
         for id_batch in _yield_ids_in_batches(ids_qs, batch_size=2000):
             try:
                 qs = (
@@ -383,7 +390,6 @@ def export_mapa_kmz(request):
             .order_by('id')
             .values_list('id', flat=True)
         )
-
         for id_batch in _yield_ids_in_batches(ids_qs, batch_size=2000):
             try:
                 qs = (
@@ -417,7 +423,80 @@ def export_mapa_kmz(request):
                         ls.style.linestyle.color = simplekml.Color.red
                         total += 1
 
-    # ---------- 3) Cidades (polígonos) ----------
+    # ---------- 3) Malha Ferroviária (linhas) ----------
+    try:
+        fld_mf
+    except NameError:
+        fld_mf = kml.newfolder(name="Malha Ferroviária")
+
+    if want_mf:
+        # 3a. IDs que intersectam (barato)
+        ids_qs = (
+            MalhaFerroviaria.objects
+            .filter(geom__intersects=aoi)
+            .order_by('id')
+            .values_list('id', flat=True)
+        )
+
+        # diagnóstico rápido: há algo pra recortar?
+        _some = list(ids_qs[:1])
+        if not _some:
+            # nada dentro da AOI — evita impressão de “não recorta”
+            # (ainda assim seguimos adiante por consistência)
+            print("[export_mapa_kmz] MF: 0 features intersectando AOI")
+
+        batch_total = 0
+        for id_batch in _yield_ids_in_batches(ids_qs, batch_size=2000):
+            try:
+                qs = (
+                    MalhaFerroviaria.objects
+                    .filter(id__in=id_batch)
+                    .annotate(
+                        clipped=Intersection(
+                            "geom",
+                            Value(aoi, output_field=GeometryField(srid=4326))
+                        )
+                    )
+                )
+                qs = _annotate_clip_simplify(
+                    qs, F("clipped"), tol_mf).only("id")
+
+                for row in qs:
+                    for ln in _extract_lines(row.geom_simpl):
+                        coords = [(float(x), float(y)) for (x, y) in ln.coords]
+                        ls = fld_mf.newlinestring(coords=coords)
+                        ls.style.linestyle.width = 2
+                        # escolha uma cor distinta para MF (ex.: preto)
+                        ls.style.linestyle.color = simplekml.Color.black
+                        total += 1
+                        batch_total += 1
+
+            except OperationalError:
+                _refresh_conn()
+                qs = (
+                    MalhaFerroviaria.objects
+                    .filter(id__in=id_batch)
+                    .annotate(
+                        clipped=Intersection(
+                            "geom",
+                            Value(aoi, output_field=GeometryField(srid=4326))
+                        )
+                    )
+                )
+                qs = _annotate_clip_simplify(
+                    qs, F("clipped"), tol_mf).only("id")
+                for row in qs:
+                    for ln in _extract_lines(row.geom_simpl):
+                        coords = [(float(x), float(y)) for (x, y) in ln.coords]
+                        ls = fld_mf.newlinestring(coords=coords)
+                        ls.style.linestyle.width = 2
+                        ls.style.linestyle.color = simplekml.Color.black
+                        total += 1
+                        batch_total += 1
+
+        print(f"[export_mapa_kmz] MF: adicionadas {batch_total} linhas ao KML")
+
+    # ---------- 4) Cidades (polígonos) ----------
     if want_cidades:
         ids_qs = (
             Cidade.objects
@@ -425,7 +504,6 @@ def export_mapa_kmz(request):
             .order_by('id')
             .values_list('id', flat=True)
         )
-
         for id_batch in _yield_ids_in_batches(ids_qs, batch_size=1000):
             try:
                 qs = (
@@ -465,7 +543,7 @@ def export_mapa_kmz(request):
                     )
                     total += 1
 
-    # ---------- 4) Áreas Federais (polígonos) ----------
+    # ---------- 5) Áreas Federais (polígonos) ----------
     if want_lim_fed:
         ids_qs = (
             LimiteFederal.objects
@@ -473,7 +551,6 @@ def export_mapa_kmz(request):
             .order_by('id')
             .values_list('id', flat=True)
         )
-
         for id_batch in _yield_ids_in_batches(ids_qs, batch_size=1000):
             try:
                 qs = (
@@ -488,7 +565,7 @@ def export_mapa_kmz(request):
                     _add_polygons_to_kml(
                         folder=fld_fed,
                         gj_geom=gj,
-                        fill_color=_color_a(60, "black"),
+                        fill_color=_color_a(60, "green"),
                         line_color=simplekml.Color.green,
                         name_prefix="Área Federal"
                     )
@@ -513,14 +590,12 @@ def export_mapa_kmz(request):
                     )
                     total += 1
 
-    # ---------- 5) Áreas Estaduais (polígonos) ----------
+    # ---------- 6) Áreas Estaduais (polígonos) ----------
     if want_areas_est:
         base_qs = Area.objects.filter(geom__intersects=aoi)
         if uf:
             base_qs = base_qs.filter(uf=uf)
-
         ids_qs = base_qs.order_by('id').values_list('id', flat=True)
-
         for id_batch in _yield_ids_in_batches(ids_qs, batch_size=1000):
             try:
                 qs = (
@@ -560,26 +635,21 @@ def export_mapa_kmz(request):
                     )
                     total += 1
 
-   # ------------ 6) Overlays (KMLs Secundários) ------------
-    # Preferência: overlays_raw (originais) -> se não vier, usa overlays (recortados no cliente)
-    overlays_raw_fc = (request.data or {}).get("overlays_raw")
-    overlays_fc = (request.data or {}).get("overlays")
-
-    # normaliza quando vier None
-    if not overlays_raw_fc:
-        overlays_raw_fc = {"type": "FeatureCollection", "features": []}
-    if not overlays_fc:
-        overlays_fc = {"type": "FeatureCollection", "features": []}
-
+    # ------------ 7) Overlays (KMLs Secundários) ------------
     # Decide fonte: se houver algo cru, recorta no servidor; senão usa o já-recortado do cliente
     src_fc = overlays_raw_fc if (
-        overlays_raw_fc.get("features") or []) else overlays_fc
+        (overlays_raw_fc.get("features") or [])) else overlays_fc
 
     if src_fc and isinstance(src_fc, dict) and src_fc.get("features"):
         fld_over = kml.newfolder(name="Overlays (KMLs Secundários)")
         feats = src_fc.get("features") or []
-
         id_to_color = {}
+
+        def _line_tol_for(overlay_id: str) -> float:
+            oid = (overlay_id or "").strip().lower()
+            if oid in {"mf", "ferrovia", "ferrovias", "malha_ferroviaria"}:
+                return tol_mf
+            return tol_lt
 
         for i, feat in enumerate(feats):
             try:
@@ -594,12 +664,10 @@ def export_mapa_kmz(request):
                 if not g or g.empty:
                     continue
 
-                # recorte no servidor (mesmo se o cliente já tiver recortado)
                 g_clip = g.intersection(aoi)
                 if not g_clip or g_clip.empty:
                     continue
 
-                # simplifica conforme tipo
                 if g_clip.geom_type in ("Polygon", "MultiPolygon"):
                     try:
                         g_clip = g_clip.simplify(
@@ -620,8 +688,9 @@ def export_mapa_kmz(request):
 
                 elif g_clip.geom_type in ("LineString", "MultiLineString", "GeometryCollection"):
                     try:
+                        line_tol = _line_tol_for(overlay_id)
                         g_clip_simpl = g_clip.simplify(
-                            tol_lt, preserve_topology=True)
+                            line_tol, preserve_topology=True)
                     except Exception:
                         g_clip_simpl = g_clip
                     _add_lines_to_kml(
@@ -633,13 +702,12 @@ def export_mapa_kmz(request):
                     total += 1
 
                 # ignora Point/MultiPoint
-
             except Exception:
                 # não derruba a exportação por 1 feature ruim
                 continue
 
     # Se nenhuma feição (além da AOI) foi encontrada e alguma camada foi pedida → 204
-    if total == 0 and (want_rios or want_lt or want_cidades or want_lim_fed or want_areas_est):
+    if total == 0 and (want_rios or want_lt or want_mf or want_cidades or want_lim_fed or want_areas_est):
         return Response(status=204)
 
     # ---------- Saída ----------
@@ -668,5 +736,4 @@ def export_mapa_kmz(request):
     resp = HttpResponse(
         kmz_bytes.read(), content_type="application/vnd.google-earth.kmz")
     resp["Content-Disposition"] = 'attachment; filename="mapa_recorte.kmz"'
-    return resp
     return resp

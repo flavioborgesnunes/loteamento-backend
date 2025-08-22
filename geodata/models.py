@@ -15,6 +15,17 @@ class LinhaTransmissao(models.Model):
     geom = models.MultiLineStringField(srid=4326, spatial_index=True)
 
 
+class MalhaFerroviaria(models.Model):
+    name = models.CharField(max_length=255, null=True,
+                            blank=True, db_index=True)
+    source = models.CharField(max_length=128, null=True, blank=True)
+    geom = models.MultiLineStringField(srid=4326, spatial_index=True)
+
+    class Meta:
+        db_table = 'geodata_malha_ferroviaria'
+        managed = False
+
+
 class LimiteFederal(models.Model):
     name = models.CharField(max_length=255, null=True,
                             blank=True, db_index=True)
