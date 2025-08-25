@@ -429,18 +429,21 @@ def export_mapa_kmz(request):
                 qs = (
                     Waterway.objects
                     .filter(id__in=id_batch)
-                    .annotate(clipped=Intersection("geom", Value(aoi, output_field=GeometryField(srid=4326))))
+                    .annotate(
+                        clipped=Intersection("geom", Value(
+                            aoi, output_field=GeometryField(srid=4326)))
+                    )
                 )
                 qs = _annotate_clip_simplify(
                     qs, F("clipped"), tol_rios).only("id")
+
                 for row in qs:
                     for ln in _extract_lines(row.geom_simpl):
                         coords_xyz, m_vals = _coords_for_kml_line(ln)
                         if not coords_xyz:
                             continue
-
-                    if fld_rios is None:
-                        fld_rios = kml.newfolder(name="Rios")
+                        if fld_rios is None:
+                            fld_rios = kml.newfolder(name="Rios")
 
                         ls = fld_rios.newlinestring(coords=coords_xyz)
                         ls.style.linestyle.width = 2
@@ -452,20 +455,28 @@ def export_mapa_kmz(request):
                             except Exception:
                                 pass
                         total += 1
+
             except OperationalError:
                 _refresh_conn()
                 qs = (
                     Waterway.objects
                     .filter(id__in=id_batch)
-                    .annotate(clipped=Intersection("geom", Value(aoi, output_field=GeometryField(srid=4326))))
+                    .annotate(
+                        clipped=Intersection("geom", Value(
+                            aoi, output_field=GeometryField(srid=4326)))
+                    )
                 )
                 qs = _annotate_clip_simplify(
                     qs, F("clipped"), tol_rios).only("id")
+
                 for row in qs:
                     for ln in _extract_lines(row.geom_simpl):
                         coords_xyz, m_vals = _coords_for_kml_line(ln)
                         if not coords_xyz:
                             continue
+                        if fld_rios is None:
+                            fld_rios = kml.newfolder(name="Rios")
+
                         ls = fld_rios.newlinestring(coords=coords_xyz)
                         ls.style.linestyle.width = 2
                         ls.style.linestyle.color = simplekml.Color.royalblue
@@ -501,7 +512,8 @@ def export_mapa_kmz(request):
                             continue
 
                         if fld_lt is None:
-                            fld_lt = kml.newfolder(name="lt")
+                            fld_lt = kml.newfolder(
+                                name="Linhas de Transmissão")
 
                         ls = fld_lt.newlinestring(coords=coords_xyz)
                         ls.style.linestyle.width = 2
@@ -538,12 +550,7 @@ def export_mapa_kmz(request):
                                 pass
                         total += 1
 
-    # ---------- 3) Malha Ferroviária (linhas) ----------
-    try:
-        fld_mf
-    except NameError:
-        fld_mf = kml.newfolder(name="Malha Ferroviária")
-
+        # ---------- 3) Malha Ferroviária (linhas) ----------
     if want_mf:
         ids_qs = (
             MalhaFerroviaria.objects
@@ -575,8 +582,9 @@ def export_mapa_kmz(request):
                         coords_xyz, m_vals = _coords_for_kml_line(ln)
                         if not coords_xyz:
                             continue
+
                         if fld_mf is None:
-                            fld_mf = kml.newfolder(name="mf")
+                            fld_mf = kml.newfolder(name="Ferrovias")
 
                         ls = fld_mf.newlinestring(coords=coords_xyz)
                         ls.style.linestyle.width = 2
@@ -602,11 +610,16 @@ def export_mapa_kmz(request):
                 )
                 qs = _annotate_clip_simplify(
                     qs, F("clipped"), tol_mf).only("id")
+
                 for row in qs:
                     for ln in _extract_lines(row.geom_simpl):
                         coords_xyz, m_vals = _coords_for_kml_line(ln)
                         if not coords_xyz:
                             continue
+
+                        if fld_mf is None:
+                            fld_mf = kml.newfolder(name="Ferrovias")
+
                         ls = fld_mf.newlinestring(coords=coords_xyz)
                         ls.style.linestyle.width = 2
                         ls.style.linestyle.color = simplekml.Color.black
@@ -641,7 +654,7 @@ def export_mapa_kmz(request):
                 for row in qs:
                     gj = json.loads(row.geom_simpl.json)
                     if fld_cidades is None:
-                        fld_cidades = kml.newfolder(name="cidades")
+                        fld_cidades = kml.newfolder(name="Municípios")
                     _add_polygons_to_kml(
                         folder=fld_cidades,
                         gj_geom=gj,
@@ -690,7 +703,7 @@ def export_mapa_kmz(request):
                 for row in qs:
                     gj = json.loads(row.geom_simpl.json)
                     if fld_fed is None:
-                        fld_fed = kml.newfolder(name="federais")
+                        fld_fed = kml.newfolder(name="Áreas Federais")
                     _add_polygons_to_kml(
                         folder=fld_fed,
                         gj_geom=gj,
@@ -736,7 +749,7 @@ def export_mapa_kmz(request):
                     qs, F("clipped"), tol_pol).only("id")
                 for row in qs:
                     if fld_est is None:
-                        fld_est = kml.newfolder(name="estaduais")
+                        fld_est = kml.newfolder(name="Áreas Estaduais")
                     gj = json.loads(row.geom_simpl.json)
                     _add_polygons_to_kml(
                         folder=fld_est,
@@ -772,7 +785,7 @@ def export_mapa_kmz(request):
         (overlays_raw_fc.get("features") or [])) else overlays_fc
 
     if src_fc and isinstance(src_fc, dict) and src_fc.get("features"):
-        fld_over = kml.newfolder(name="Overlays (KMLs Secundários)")
+        fld_over = kml.newfolder(name="Overlays")
         feats = src_fc.get("features") or []
 
         def _line_tol_for(overlay_id: str) -> float:
