@@ -51,9 +51,34 @@ class RegisterUserSerializer(serializers.ModelSerializer):
         if attrs['password'] != attrs['password2']:
             raise serializers.ValidationError(
                 {"password": "As senhas não coincidem."})
-
-        # Validação de complexidade da senha do Django
         validate_password(attrs['password'])
+
+        request_user = self.context.get(
+            'request').user if self.context.get('request') else None
+        desired_role = attrs.get('role')
+
+        if request_user and request_user.is_authenticated:
+            # Dono/adm criando usuários
+            if request_user.role not in ['dono', 'adm']:
+                raise serializers.ValidationError(
+                    "Sem permissão para criar usuários.")
+
+            # Regra de quem pode criar o quê:
+            if request_user.role == 'dono':
+                if desired_role not in ['adm', 'comum']:
+                    raise serializers.ValidationError(
+                        "Dono só pode criar usuários 'adm' ou 'comum'.")
+            elif request_user.role == 'adm':
+                if desired_role not in ['comum', 'adm']:
+                    # Se quiser restringir 'adm' por adm, troque para only 'comum'
+                    raise serializers.ValidationError(
+                        "Administrador só pode criar usuários 'comum' ou 'adm'.")
+
+        else:
+            # Público (não autenticado) só pode se registrar como 'dono'
+            if desired_role != 'dono':
+                raise serializers.ValidationError(
+                    "Apenas clientes podem se registrar diretamente como 'dono'.")
 
         return attrs
 
@@ -74,9 +99,10 @@ class RegisterUserSerializer(serializers.ModelSerializer):
             elif request_user.role == 'adm':
                 validated_data['dono'] = request_user.dono
         else:
+            # Registro público: só 'dono'
             if validated_data.get('role') != 'dono':
                 raise serializers.ValidationError(
-                    "Apenas clientes podem se registrar diretamente.")
+                    "Apenas clientes podem se registrar diretamente como 'dono'.")
             validated_data['dono'] = None
 
         user = User(**validated_data)

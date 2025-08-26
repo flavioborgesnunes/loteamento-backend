@@ -4,3 +4,4 @@ media/
 data/
 .env
 *.pyc
+email/

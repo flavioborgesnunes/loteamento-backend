@@ -11,15 +11,28 @@ class UserManager(BaseUserManager):
         if not email:
             raise ValueError("O campo email é obrigatório")
         email = self.normalize_email(email)
+
+        # Segurança: impedir que alguém crie user comum já com superpoderes
+        extra_fields.setdefault('is_staff', False)
+        extra_fields.setdefault('is_superuser', False)
+
         user = self.model(email=email, role=role, dono=dono, **extra_fields)
         user.set_password(password)
         user.save()
         return user
 
     def create_superuser(self, email, password=None, **extra_fields):
+        # Superuser é um operador da plataforma, NÃO um 'dono' do seu produto
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
-        return self.create_user(email, password, role='dono', **extra_fields)
+
+        if extra_fields.get('is_staff') is not True:
+            raise ValueError('Superuser precisa ter is_staff=True.')
+        if extra_fields.get('is_superuser') is not True:
+            raise ValueError('Superuser precisa ter is_superuser=True.')
+
+        # Não force 'role' aqui; deixe o default 'comum' ou use 'adm' se preferir
+        return self.create_user(email, password, **extra_fields)
 
 
 class User(FileCleanupMixin, AbstractBaseUser, PermissionsMixin):
