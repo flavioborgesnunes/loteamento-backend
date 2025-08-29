@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'ia',
     'rios',
     'geodata',
+    "projetos",
 ]
 
 MIDDLEWARE = [
