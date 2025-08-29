@@ -118,14 +118,12 @@ def _yield_ids_in_batches(qs_ids, batch_size=2000):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def list_projects(request):
+    """
+    GET /api/projetos/
+    Retorna todos os projetos (somente leitura liberada para todos autenticados).
+    """
     qs = Project.objects.all().order_by("-created_at")
-    try:
-        if getattr(request.user, "role", None) == "dono":
-            qs = qs.filter(dono=request.user)
-        elif getattr(request.user, "dono", None):
-            qs = qs.filter(dono_id=getattr(request.user, "dono", None))
-    except Exception:
-        pass
+    # 🔑 Não filtra por dono aqui → leitura liberada
     return Response(ProjectSerializer(qs, many=True).data)
 
 
@@ -149,8 +147,6 @@ def update_delete_project(request, pk: int):
 @permission_classes([IsAuthenticated])
 def project_map_summary(request, pk: int):
     proj = get_object_or_404(Project, pk=pk)
-    if not _same_tenant_or_owner(request.user, proj):
-        return Response({"detail": "Sem permissão."}, status=403)
 
     counts, colors = {}, {}
     for pf in ProjectFeature.objects.filter(project=proj).only("overlay_id", "color").iterator():
@@ -158,8 +154,10 @@ def project_map_summary(request, pk: int):
         if pf.color and pf.overlay_id not in colors:
             colors[pf.overlay_id] = pf.color
 
-    overlays = [{"overlay_id": k, "count": counts.get(
-        k, 0), "color": colors.get(k)} for k in sorted(counts.keys())]
+    overlays = [
+        {"overlay_id": k, "count": counts.get(k, 0), "color": colors.get(k)}
+        for k in sorted(counts.keys())
+    ]
 
     return Response({
         "id": proj.id,
@@ -175,18 +173,21 @@ def project_map_summary(request, pk: int):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def project_features_geojson(request, pk: int):
+    # ✅ qualquer usuário autenticado pode visualizar
     proj = get_object_or_404(Project, pk=pk)
-    if not _same_tenant_or_owner(request.user, proj):
-        return Response({"detail": "Sem permissão."}, status=403)
 
     overlay_id = request.query_params.get("overlay_id")
     if not overlay_id:
         return Response({"detail": "overlay_id é obrigatório."}, status=400)
+
     simplified = str(request.query_params.get("simplified", "true")).lower() in {
         "1", "true", "yes", "y"}
 
     feats = []
-    for pf in ProjectFeature.objects.filter(project=proj, overlay_id=overlay_id).only("geom", "geom_simpl", "properties", "color").iterator():
+    qs = ProjectFeature.objects.filter(project=proj, overlay_id=overlay_id).only(
+        "geom", "geom_simpl", "properties", "color"
+    )
+    for pf in qs.iterator():
         g = pf.geom_simpl if simplified and pf.geom_simpl else pf.geom
         if not g:
             continue
@@ -195,6 +196,7 @@ def project_features_geojson(request, pk: int):
             "properties": {**(pf.properties or {}), "__overlay_id": overlay_id, "__color": pf.color},
             "geometry": json.loads(g.geojson),
         })
+
     return Response({"type": "FeatureCollection", "features": feats})
 
 

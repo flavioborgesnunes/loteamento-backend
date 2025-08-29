@@ -2,17 +2,53 @@ from __future__ import annotations
 
 import json
 
+from django.contrib.auth import get_user_model
 from django.contrib.gis.geos import GEOSGeometry, MultiPolygon
 from rest_framework import serializers
 
 from .models import Project
 
+User = get_user_model()
+
+
+# projetos/serializers.py
+
 
 class ProjectSerializer(serializers.ModelSerializer):
+    owner = serializers.PrimaryKeyRelatedField(read_only=True)
+    dono = serializers.PrimaryKeyRelatedField(read_only=True)
+
+    owner_nome = serializers.SerializerMethodField()
+    dono_nome = serializers.SerializerMethodField()
+    owner_email = serializers.SerializerMethodField()
+    dono_email = serializers.SerializerMethodField()
+
+    def get_owner_nome(self, obj):
+        u = getattr(obj, "owner", None)
+        return getattr(u, "nome", None) if u else None
+
+    def get_dono_nome(self, obj):
+        u = getattr(obj, "dono", None)
+        return getattr(u, "nome", None) if u else None
+
+    def get_owner_email(self, obj):
+        u = getattr(obj, "owner", None)
+        return getattr(u, "email", None) if u else None
+
+    def get_dono_email(self, obj):
+        u = getattr(obj, "dono", None)
+        return getattr(u, "email", None) if u else None
+
     class Meta:
         model = Project
-        fields = ["id", "name", "description", "uf", "dono",
-                  "owner", "layer_flags", "created_at", "updated_at"]
+        fields = [
+            "id", "name", "description", "uf",
+            "owner", "owner_nome", "owner_email",
+            "dono",  "dono_nome",  "dono_email",
+            "created_at", "updated_at",
+            "aoi_geom", "layer_flags",
+        ]
+        read_only_fields = ["id", "owner", "dono", "created_at", "updated_at"]
 
 
 class ProjectUpsertExportSerializer(serializers.Serializer):
