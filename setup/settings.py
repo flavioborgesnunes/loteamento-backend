@@ -10,10 +10,26 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
+import os
 from datetime import timedelta
 from pathlib import Path
 
 from decouple import config
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+# carregar .env
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / ".env")
+except Exception:
+    pass
+
+
+PGBOUNCER = os.getenv("PGBOUNCER", "0") == "1"
+DB_HOST = os.getenv("DB_HOST", "localhost")
+LOCAL_DB = DB_HOST in ("localhost", "127.0.0.1")
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -45,6 +61,7 @@ INSTALLED_APPS = [
 
     # App de terceiros
     'rest_framework',
+    'rest_framework_gis',
     'rest_framework_simplejwt',
     'corsheaders',
     'drf_yasg',
@@ -56,7 +73,8 @@ INSTALLED_APPS = [
     'ia',
     'rios',
     'geodata',
-    "projetos",
+    'projetos',
+    'restricoes',
 ]
 
 MIDDLEWARE = [
@@ -104,22 +122,27 @@ WSGI_APPLICATION = 'setup.wsgi.application'
 #     }
 # }
 
+# settings.py
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.contrib.gis.db.backends.postgis',
-        'NAME': 'loteamento',
-        'USER': 'lotenet',
-        'PASSWORD': '314628',
-        'HOST': 'localhost',
-        'PORT': '5432',
-        # mantém conexão viva entre requisições (ajuste se preferir)
-        "CONN_MAX_AGE": 60,
+    "default": {
+        "ENGINE": "django.contrib.gis.db.backends.postgis",
+        "NAME": os.getenv("DB_NAME", "loteamento"),
+        "USER": os.getenv("DB_USER", "lotenet"),
+        "PASSWORD": os.getenv("DB_PASSWORD", "314628"),
+        "HOST": DB_HOST,
+        "PORT": os.getenv("DB_PORT", "5432"),
+        "CONN_MAX_AGE": 0 if PGBOUNCER else 60,  # 0 com pgbouncer; 60 sem
         "OPTIONS": {
-            "sslmode": "require",
+            # Em produção com provider (Neon/Render/RDS etc): use 'require'
+            # Em localhost: use 'prefer' (ou remova) para não quebrar
+            "sslmode": os.getenv("DB_SSLMODE", "prefer" if LOCAL_DB else "require"),
+            # Keepalives
             "keepalives": 1,
             "keepalives_idle": 30,
             "keepalives_interval": 10,
             "keepalives_count": 5,
+            # Timeouts (ms)
+            "options": "-c statement_timeout=120000 -c idle_in_transaction_session_timeout=60000 -c lock_timeout=30000",
         },
     }
 }

@@ -1,28 +1,43 @@
-# api/urls.py  ← SUBSTITUA TODO O ARQUIVO POR ESTE
-
 from django.urls import include, path
 from geodata import views as geodata_views
 from ia import views as ia_views
+# Projetos (funções avulsas)
 from projetos.views import (exportar_projeto, list_projects,
                             project_features_geojson, project_map_summary,
                             project_overlay_delete, project_overlay_patch,
                             update_delete_project)
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
+# ViewSets do app restricoes
+from restricoes import views as restricoes_views
 from rios import views as rios_views
 # Apps existentes
 from userauth import views as userauths_views
 
-# Projetos (tudo vem direto do app projetos)
-# from projetos.views import (ProjectViewSet, exportar_projeto,
-#                             projeto_features_geojson, projeto_map_summary,
-#                             projeto_overlay_delete, projeto_overlay_update)
+# ------------------------------------------------------------------------------
+# DRF Router para os endpoints de "restricoes"
+# ------------------------------------------------------------------------------
+
+# restricoes_router = DefaultRouter()
+# restricoes_router.register(
+#     r"av", restricoes_views.AreaVerdeViewSet, basename="av")
+# restricoes_router.register(
+#     r"corte-av", restricoes_views.CorteAreaVerdeViewSet, basename="corte-av")
+# restricoes_router.register(
+#     r"margem-rio", restricoes_views.MargemRioViewSet, basename="margem-rio")
+# restricoes_router.register(
+#     r"margem-lt", restricoes_views.MargemLTViewSet, basename="margem-lt")
+# restricoes_router.register(
+#     r"margem-ferrovia", restricoes_views.MargemFerroviaViewSet, basename="margem-ferrovia")
+# restricoes_router.register(
+#     r"ruas", restricoes_views.RuaViewSet, basename="ruas")
+# restricoes_router.register(
+#     r"al", restricoes_views.AreaLoteavelViewSet, basename="al")
 
 
-# router = DefaultRouter()
-# ViewSet de projetos (CRUD)
-# router.register(r"projetos", ProjectViewSet, basename="projetos")
-
+# ------------------------------------------------------------------------------
+# URL patterns
+# ------------------------------------------------------------------------------
 urlpatterns = [
     # User / Auth
     path("user/", userauths_views.UserView.as_view()),
@@ -35,15 +50,13 @@ urlpatterns = [
     path("user/password-change/", userauths_views.PasswordChangeView.as_view()),
 
     # IA
-    # path("openai/", ia_views.LegalQueryView.as_view(), name="openai_query"),
     path("autofill/", ia_views.LegalAutoFillView.as_view(), name="autofill"),
 
     # Rios
     path("rios/geojson/", rios_views.rios_geojson, name="rios-geojson"),
     path("export/rios/", rios_views.export_rios_kmz, name="export-rios-kmz"),
 
-    # Geodata (legado). Se quiser, mantenha para compatibilidade;
-    # Caso vá usar só o fluxo de projetos, você pode remover esta rota:
+    # Geodata (legado/compatibilidade)
     path("export/mapa/", geodata_views.export_mapa_kmz, name="export-mapa-kmz"),
 
     # Projetos
@@ -54,5 +67,9 @@ urlpatterns = [
     path("projetos/<int:pk>/overlay/", project_overlay_patch),
     path("projetos/<int:pk>/overlay/delete/", project_overlay_delete),
     path("projetos/exportar/", exportar_projeto),
-
+    
+    # Restrições
+    path("projetos/<int:project_id>/restricoes/", restricoes_views.RestricoesCreateAPIView.as_view()),
+    path("projetos/<int:project_id>/restricoes/list/", restricoes_views.RestricoesListByProjectAPIView.as_view()),
+    path("restricoes/<int:restricoes_id>/geo/", restricoes_views.RestricoesGeoDetailAPIView.as_view()),
 ]
