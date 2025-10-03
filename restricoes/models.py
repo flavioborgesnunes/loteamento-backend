@@ -14,6 +14,10 @@ class Restricoes(models.Model):
     notes = models.TextField(blank=True, default="")
     percent_permitido = models.FloatField(null=True, blank=True)
     corte_pct_cache = models.FloatField(null=True, blank=True)
+    
+    aoi_snapshot   = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
+    area_loteavel  = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
+
 
     source = models.CharField(max_length=40, default="geoman")
     is_active = models.BooleanField(default=True)

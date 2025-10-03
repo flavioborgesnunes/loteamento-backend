@@ -27,6 +27,61 @@ SRID_WEBMERC = 3857
 
 SNAP_GRID = 1e-7
 
+# --- helpers para unir / diferenciar / medir ---
+
+def _union_mpolys_4674(polys) -> MultiPolygon | None:
+    """
+    União robusta de vários polígonos. Ignora None/empty.
+    Retorna MultiPolygon 4674 ou None.
+    """
+    acc = None
+    for p in polys or []:
+        if not p:
+            continue
+        try:
+            mp = _norm_poly_4674(p)  # garante MP 4674
+            if mp.empty:
+                continue
+            acc = mp if acc is None else acc.union(mp)
+        except Exception:
+            continue
+    if not acc:
+        return None
+    return _ensure_mpoly_4674(acc)
+
+def _diff_clip(aoi_mp_4674: MultiPolygon, sub_mp_4674: MultiPolygon | None) -> MultiPolygon | None:
+    """
+    Loteável = AOI \ Subtração. Garante MP 4674 e clip final pela AOI.
+    """
+    if not aoi_mp_4674 or aoi_mp_4674.empty:
+        return None
+    if not sub_mp_4674 or sub_mp_4674.empty:
+        return _ensure_mpoly_4674(aoi_mp_4674)
+    try:
+        d = aoi_mp_4674.difference(sub_mp_4674)
+        if not d or d.empty:
+            return None
+        d = _norm_poly_4674(d)
+        d = _norm_poly_4674(d.intersection(aoi_mp_4674))
+        return None if d.empty else _ensure_mpoly_4674(d)
+    except Exception:
+        return None
+
+def _area_m2(mp_4674: GEOSGeometry) -> float:
+    """
+    Área aproximada em m² via 3857 (boa o suficiente aqui).
+    """
+    if not mp_4674 or mp_4674.empty:
+        return 0.0
+    g = mp_4674.clone()
+    try:
+        if g.srid != 3857:
+            g.transform(3857)
+        return float(g.area)
+    except Exception:
+        return 0.0
+
+
 
 # ---------- Helpers mínimos e robustos ----------
 
@@ -68,23 +123,21 @@ def _ensure_mpoly_4674(g: GEOSGeometry) -> MultiPolygon:
 
 
 def _debug_geom(label: str, g: GEOSGeometry):
-    """Loga bbox e centróide; se SRID vier None, assume 4326 só para log."""
+    """Loga bbox e centroid em 4326; tolera srid=None."""
     try:
         if not g or g.empty:
             print(f"[restricoes][{label}] EMPTY")
             return
-        g_log = g.clone()
-        if not getattr(g_log, "srid", None):
-            g_log.srid = 4326  # assume WGS84 para log
-        g4326 = g_log.clone()
-        if g4326.srid != 4326:
-            g4326.transform(4326)
-        c = g4326.centroid
-        print(f"[restricoes][{label}] srid={g.srid} type={g.geom_type} "
-              f"bbox={g4326.extent} centroid=({c.x:.6f}, {c.y:.6f})")
+        gg = g.clone()
+        if not getattr(gg, "srid", None):
+            gg.srid = 4326
+        if gg.srid != 4326:
+            gg.transform(4326)
+        c = gg.centroid
+        print(f"[restricoes][{label}] srid={getattr(g,'srid',None)} type={g.geom_type} "
+              f"bbox={gg.extent} centroid=({c.x:.6f}, {c.y:.6f})")
     except Exception as e:
         print(f"[restricoes][{label}] ERROR: {e}")
-
 
 SNAP_GRID = 1e-7  # ~1cm em 4326 (aprox), melhora robustez topológica
 
@@ -257,9 +310,8 @@ def _centroid_log(g: GEOSGeometry, label: str):
         print(f"[restricoes] {label}: <centroid fail> srid={getattr(g,'srid',None)}")
 
 
-def _iter_fc(fc: Dict[str, Any]):
-    """Itera com segurança sobre FeatureCollection."""
-    if not isinstance(fc, dict) or fc.get("type") != "FeatureCollection":
+def _iter_fc(fc):
+    if not fc or fc.get("type") != "FeatureCollection":
         return []
     return fc.get("features") or []
 
@@ -346,43 +398,43 @@ class RestricoesCreateAPIView(APIView):
     def post(self, request, project_id: int, *args, **kwargs):
         proj = get_object_or_404(Project, pk=project_id)
 
-        # Campos simples
+        # ---- campos básicos
         label = request.data.get("label", "") or ""
         notes = request.data.get("notes", "") or ""
-        percent_permitido = request.data.get("percent_permitido")
-        corte_pct_cache = request.data.get("corte_pct_cache")
+        percent_permitido = request.data.get("percent_permitido", None)
+        corte_pct_cache = request.data.get("corte_pct_cache", None)
         source = request.data.get("source", "geoman")
 
-        # Bloco adHoc (geometrias vindas do front)
+        # ---- ad hoc
         ad_hoc = request.data.get("adHoc") or {}
-
-        # AOI (OBRIGATÓRIA)
         aoi_in = ad_hoc.get("aoi")
         if not aoi_in:
             return Response({"detail": "Campo obrigatório ausente: adHoc.aoi"},
                             status=status.HTTP_400_BAD_REQUEST)
+
         try:
-            aoi_g = _from_geojson(aoi_in, SRID_IN)
-            aoi_snapshot = _as_mpoly(_to_srid(aoi_g, SRID_WGS))
+            aoi_g = _from_geojson(aoi_in)           # força 4326
+            aoi_snapshot = _ensure_mpoly_4674(aoi_g)  # MP 4674
             _debug_geom("AOI", aoi_snapshot)
         except Exception as e:
             return Response({"detail": f"AOI inválida: {e}"}, status=status.HTTP_400_BAD_REQUEST)
 
         # Collections
-        av_fc       = ad_hoc.get("av") or {}
-        corte_fc    = ad_hoc.get("corte_av") or {}
-        ruas_fc     = ad_hoc.get("ruas") or {}
-        rios_fc     = ad_hoc.get("rios") or {}
-        lt_fc       = ad_hoc.get("lt") or {}
-        fer_fc      = ad_hoc.get("ferrovias") or {}
+        av_fc   = ad_hoc.get("av") or {}
+        corte_fc= ad_hoc.get("corte_av") or {}
+        ruas_fc = ad_hoc.get("ruas") or {}
+        rios_fc = ad_hoc.get("rios") or {}
+        lt_fc   = ad_hoc.get("lt") or {}
+        fer_fc  = ad_hoc.get("ferrovias") or {}
 
         # Defaults
-        default_rua_width = float(ad_hoc.get("default_rua_width", 12) or 12)
-        def_margem_rio    = float(ad_hoc.get("def_margem_rio", 30) or 30)
-        def_margem_lt     = float(ad_hoc.get("def_margem_lt", 15) or 15)
-        def_margem_fer    = float(ad_hoc.get("def_margem_fer", 20) or 20)
+        default_rua_width = ad_hoc.get("default_rua_width", 12)
+        def_margem_rio = ad_hoc.get("def_margem_rio", 30)
+        def_margem_lt = ad_hoc.get("def_margem_lt", 15)
+        def_margem_fer = ad_hoc.get("def_margem_fer", 20)
 
         with transaction.atomic():
+            # Cria versão
             r = Restricoes.objects.create(
                 project=proj,
                 aoi_snapshot=aoi_snapshot,
@@ -394,38 +446,36 @@ class RestricoesCreateAPIView(APIView):
                 created_by=request.user if request.user.is_authenticated else None,
             )
 
-            # --- Áreas Verdes (MultiPolygon 4674)
-            av_bulk: List[AreaVerdeV] = []
+            # ----------------- Áreas Verdes (MultiPolygon 4674) -----------------
+            av_bulk = []
             for feat in _iter_fc(av_fc):
                 geom = feat.get("geometry")
                 if not geom: 
                     continue
                 try:
-                    g = _as_mpoly(_to_srid(_from_geojson(geom), SRID_WGS))
-                    if not g.empty:
-                        av_bulk.append(AreaVerdeV(restricoes=r, geom=g))
+                    g = _ensure_mpoly_4674(_from_geojson(geom))
                 except Exception:
-                    pass
+                    continue
+                av_bulk.append(AreaVerdeV(restricoes=r, geom=g))
             if av_bulk:
                 AreaVerdeV.objects.bulk_create(av_bulk, batch_size=500)
 
-            # --- Cortes de AV (MultiPolygon 4674)
-            corte_bulk: List[CorteAreaVerdeV] = []
+            # ----------------- Cortes de AV (MultiPolygon 4674) -----------------
+            corte_bulk = []
             for feat in _iter_fc(corte_fc):
                 geom = feat.get("geometry")
-                if not geom:
+                if not geom: 
                     continue
                 try:
-                    g = _as_mpoly(_to_srid(_from_geojson(geom), SRID_WGS))
-                    if not g.empty:
-                        corte_bulk.append(CorteAreaVerdeV(restricoes=r, geom=g))
+                    g = _ensure_mpoly_4674(_from_geojson(geom))
                 except Exception:
-                    pass
+                    continue
+                corte_bulk.append(CorteAreaVerdeV(restricoes=r, geom=g))
             if corte_bulk:
                 CorteAreaVerdeV.objects.bulk_create(corte_bulk, batch_size=500)
 
-            # --- Ruas (eixo + mask com clip pela AOI)
-            rua_bulk: List[RuaV] = []
+            # ----------------- Ruas: eixo + mask (clip na AOI) -----------------
+            rua_bulk = []
             for feat in _iter_fc(ruas_fc):
                 geom = feat.get("geometry")
                 if not geom:
@@ -433,23 +483,20 @@ class RestricoesCreateAPIView(APIView):
                 props = feat.get("properties") or {}
                 largura = _get_prop(props, "width_m", default_rua_width)
                 try:
-                    largura = float(largura) if largura is not None else default_rua_width
+                    largura = float(largura) if largura is not None else float(default_rua_width)
                 except Exception:
-                    largura = default_rua_width
-                    
+                    largura = float(default_rua_width or 12)
+
                 try:
                     eixo_raw = _from_geojson(geom)
-                    eixo = _norm_line_4674(eixo_raw)
-                    
+                    eixo = _norm_line_4674(eixo_raw)         # MLS 4674
                     if not getattr(eixo, "srid", None):
                         eixo.srid = SRID_WGS
                     _debug_geom("rua.eixo", eixo)
-                    
                 except Exception:
                     continue
 
-                mask = _buffer_meters_stable_clip_aoi(eixo, largura / 2.0, aoi_snapshot)
-                _debug_geom("rua.mask", mask)
+                mask = _buffer_meters_stable_clip_aoi(eixo, largura/2.0, aoi_snapshot)
                 if mask:
                     mask = _ensure_mpoly_4674(mask)
                 _debug_geom("rua.mask", mask)
@@ -460,11 +507,9 @@ class RestricoesCreateAPIView(APIView):
                     rua_bulk.append(RuaV(restricoes=r, eixo=eixo, largura_m=largura))
             if rua_bulk:
                 RuaV.objects.bulk_create(rua_bulk, batch_size=500)
-                
 
-
-            # --- Rios (centerline + faixa)
-            rio_bulk: List[MargemRioV] = []
+            # ----------------- Rios: centerline + faixa -----------------
+            rio_bulk = []
             for feat in _iter_fc(rios_fc):
                 geom = feat.get("geometry")
                 if not geom:
@@ -472,39 +517,30 @@ class RestricoesCreateAPIView(APIView):
                 props = feat.get("properties") or {}
                 margem_val = _get_prop(props, "margem_m", def_margem_rio)
                 try:
-                    margem = float(margem_val) if margem_val is not None else def_margem_rio
+                    margem = float(margem_val) if margem_val is not None else float(def_margem_rio)
                 except Exception:
-                    margem = def_margem_rio
+                    margem = float(def_margem_rio)
 
                 try:
                     line_raw = _from_geojson(geom)
                     line = _norm_line_4674(line_raw)
-                    
                     if not getattr(line, "srid", None):
                         line.srid = SRID_WGS
-                    
                     _debug_geom("rio.centerline", line)
-                    
-                    _centroid_log(line, "rio.centerline")
                 except Exception:
                     continue
 
                 faixa = _buffer_meters_stable_clip_aoi(line, margem, aoi_snapshot)
                 if faixa:
                     faixa = _ensure_mpoly_4674(faixa)
-                _debug_geom("rio.faixa", faixa)  # (e lt/faixa, fer/faixa)
-
-                
-                if faixa:
-                    _centroid_log(faixa, "rio.faixa")
+                _debug_geom("rio.faixa", faixa)
 
                 rio_bulk.append(MargemRioV(restricoes=r, centerline=line, margem_m=margem, faixa=faixa))
             if rio_bulk:
                 MargemRioV.objects.bulk_create(rio_bulk, batch_size=500)
 
-
-            # --- Linhas de Transmissão (centerline + faixa)
-            lt_bulk: List[MargemLTV] = []
+            # ----------------- Linhas de Transmissão: centerline + faixa -----------------
+            lt_bulk = []
             for feat in _iter_fc(lt_fc):
                 geom = feat.get("geometry")
                 if not geom:
@@ -512,37 +548,30 @@ class RestricoesCreateAPIView(APIView):
                 props = feat.get("properties") or {}
                 margem_val = _get_prop(props, "margem_m", def_margem_lt)
                 try:
-                    margem = float(margem_val) if margem_val is not None else def_margem_lt
+                    margem = float(margem_val) if margem_val is not None else float(def_margem_lt)
                 except Exception:
-                    margem = def_margem_lt
+                    margem = float(def_margem_lt)
 
                 try:
                     line_raw = _from_geojson(geom)
                     line = _norm_line_4674(line_raw)
-                    
                     if not getattr(line, "srid", None):
                         line.srid = SRID_WGS
-                        
-                    _centroid_log(line, "lt.centerline")
+                    _debug_geom("lt.centerline", line)
                 except Exception:
                     continue
 
                 faixa = _buffer_meters_stable_clip_aoi(line, margem, aoi_snapshot)
                 if faixa:
                     faixa = _ensure_mpoly_4674(faixa)
-                _debug_geom("rio.faixa", faixa)  # (e lt/faixa, fer/faixa)
-
-                
-                if faixa:
-                    _centroid_log(faixa, "lt.faixa")
+                _debug_geom("lt.faixa", faixa)
 
                 lt_bulk.append(MargemLTV(restricoes=r, centerline=line, margem_m=margem, faixa=faixa))
             if lt_bulk:
                 MargemLTV.objects.bulk_create(lt_bulk, batch_size=500)
 
-
-            # --- Ferrovias (centerline + faixa)
-            fer_bulk: List[MargemFerroviaV] = []
+            # ----------------- Ferrovias: centerline + faixa -----------------
+            fer_bulk = []
             for feat in _iter_fc(fer_fc):
                 geom = feat.get("geometry")
                 if not geom:
@@ -550,40 +579,72 @@ class RestricoesCreateAPIView(APIView):
                 props = feat.get("properties") or {}
                 margem_val = _get_prop(props, "margem_m", def_margem_fer)
                 try:
-                    margem = float(margem_val) if margem_val is not None else def_margem_fer
+                    margem = float(margem_val) if margem_val is not None else float(def_margem_fer)
                 except Exception:
-                    margem = def_margem_fer
+                    margem = float(def_margem_fer)
 
                 try:
                     line_raw = _from_geojson(geom)
                     line = _norm_line_4674(line_raw)
-                    
                     if not getattr(line, "srid", None):
                         line.srid = SRID_WGS
-                    
-                    _centroid_log(line, "fer.centerline")
+                    _debug_geom("fer.centerline", line)
                 except Exception:
                     continue
-                
-                line = _norm_line_4674(line_raw)
-                _debug_geom("fer.centerline", line)
 
                 faixa = _buffer_meters_stable_clip_aoi(line, margem, aoi_snapshot)
                 if faixa:
                     faixa = _ensure_mpoly_4674(faixa)
-                _debug_geom("rio.faixa", faixa)  # (e lt/faixa, fer/faixa)
-
-
-                
-                if faixa:
-                    _centroid_log(faixa, "fer.faixa")
+                _debug_geom("fer.faixa", faixa)
 
                 fer_bulk.append(MargemFerroviaV(restricoes=r, centerline=line, margem_m=margem, faixa=faixa))
             if fer_bulk:
                 MargemFerroviaV.objects.bulk_create(fer_bulk, batch_size=500)
 
+            # ----------------- ÁREA LOTEÁVEL -----------------
+            # Regra: Loteável = AOI − ( máscaras ∪ faixas ∪ (AV_total − Corte_total) )
+            try:
+                # 1) máscaras/faixas (infra)
+                masks_polys = []
+                masks_polys.extend([row.mask for row in rua_bulk if getattr(row, "mask", None)])
+                masks_polys.extend([row.faixa for row in rio_bulk if getattr(row, "faixa", None)])
+                masks_polys.extend([row.faixa for row in lt_bulk  if getattr(row, "faixa", None)])
+                masks_polys.extend([row.faixa for row in fer_bulk if getattr(row, "faixa", None)])
+                union_masks = _union_mpolys_4674(masks_polys)
 
-            # ---- Resumo p/ resposta (contadores)
+                # 2) AV efetiva
+                av_polys    = [row.geom for row in av_bulk]      # AV (MP 4674)
+                corte_polys = [row.geom for row in corte_bulk]   # Cortes
+                av_total    = _union_mpolys_4674(av_polys)
+                corte_total = _union_mpolys_4674(corte_polys)
+                av_efetiva  = None
+                if av_total:
+                    if corte_total:
+                        try:
+                            av_efetiva = _norm_poly_4674(av_total.difference(corte_total))
+                            if av_efetiva and av_efetiva.empty:
+                                av_efetiva = None
+                        except Exception:
+                            av_efetiva = None
+                    else:
+                        av_efetiva = av_total
+
+                # 3) Subtração total
+                excl = _union_mpolys_4674([x for x in [union_masks, av_efetiva] if x])
+
+                # 4) Loteável
+                loteavel = _diff_clip(aoi_snapshot, excl)
+
+                # 5) Persistir
+                r.area_loteavel = loteavel if loteavel and not loteavel.empty else None
+                r.save(update_fields=["area_loteavel"])
+
+                if r.area_loteavel:
+                    print(f"[restricoes] loteavel area_m2={_area_m2(r.area_loteavel):.2f}")
+            except Exception as e:
+                print(f"[restricoes] erro ao gerar area_loteavel: {e}")
+
+            # ----------------- resumo p/ resposta -----------------
             qs = (
                 Restricoes.objects
                 .filter(pk=r.pk)
@@ -600,8 +661,6 @@ class RestricoesCreateAPIView(APIView):
 
         data = RestricoesSerializer(qs).data
         return Response(data, status=status.HTTP_201_CREATED)
-
-
 # ---------- LIST versões por projeto ----------
 
 class RestricoesListByProjectAPIView(ListAPIView):
@@ -634,163 +693,88 @@ from django.shortcuts import get_object_or_404
 import json
 
 class RestricoesGeoDetailAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, restricoes_id: int, *args, **kwargs):
-        from .models import Restricoes, SRID_WGS
+        r = get_object_or_404(Restricoes, pk=restricoes_id)
 
-        # --- helpers locais de log ---
-        def _debug_geom(label, g):
-            """Loga bbox e centroid em 4326; tolera srid=None."""
-            try:
-                if not g or g.empty:
-                    print(f"[restricoes.detail][{label}] EMPTY")
-                    return
-                gg = g.clone()
-                if not getattr(gg, "srid", None):
-                    gg.srid = 4326
-                if gg.srid != 4326:
-                    gg.transform(4326)
-                c = gg.centroid
-                print(f"[restricoes.detail][{label}] srid={getattr(g,'srid',None)} "
-                      f"type={g.geom_type} bbox={gg.extent} "
-                      f"centroid=({c.x:.6f}, {c.y:.6f})")
-            except Exception as e:
-                print(f"[restricoes.detail][{label}] ERROR: {e}")
-
-        def fc(features):
-            return {"type": "FeatureCollection", "features": features}
+        def fc(features): 
+            return {"type":"FeatureCollection","features":features}
 
         def feat(g, props=None):
             if not g:
                 return None
             try:
-                return {
-                    "type": "Feature",
-                    "geometry": json.loads(g.geojson),
-                    "properties": props or {},
-                }
+                return {"type":"Feature","geometry": json.loads(g.geojson), "properties": props or {}}
             except Exception:
                 return None
 
-        # --- carrega versão ---
-        r = get_object_or_404(Restricoes, pk=restricoes_id)
         print(f"[restricoes.detail] GET restricoes_id={r.id} project={r.project_id} version={r.version}")
-
-        # --- AOI ---
-        aoi_geojson = json.loads(r.aoi_snapshot.geojson) if r.aoi_snapshot else None
         if r.aoi_snapshot:
-            print(f"[restricoes.detail] SRID_WGS={SRID_WGS} (esperado para persistência)")
             _debug_geom("AOI", r.aoi_snapshot)
 
-        # --- AV e Cortes ---
-        av_feats, corte_feats = [], []
+        # AV / Cortes
+        av_feats = [feat(row.geom) for row in r.areas_verdes.all()]
+        corte_feats = [feat(row.geom) for row in r.cortes_av.all()]
 
-        av_qs = list(r.areas_verdes.all())
-        print(f"[restricoes.detail] areas_verdes_count={len(av_qs)}")
-        for i, row in enumerate(av_qs):
-            if i < 3: _debug_geom(f"AV[{i}]", row.geom)
-            f = feat(row.geom)
-            if f: av_feats.append(f)
-
-        cortes_qs = list(r.cortes_av.all())
-        print(f"[restricoes.detail] cortes_av_count={len(cortes_qs)}")
-        for i, row in enumerate(cortes_qs):
-            if i < 3: _debug_geom(f"CORTE_AV[{i}]", row.geom)
-            f = feat(row.geom)
-            if f: corte_feats.append(f)
-
-        # --- Ruas (eixos + máscaras) ---
+        # Ruas
         rua_eixo_feats, rua_mask_feats = [], []
-        ruas_qs = list(r.ruas.all())
-        print(f"[restricoes.detail] ruas_count={len(ruas_qs)}")
-        for i, row in enumerate(ruas_qs):
+        for row in r.ruas.all():
             try:
                 if row.eixo:
-                    if i < 3: _debug_geom(f"RUAS.eixo[{i}]", row.eixo)
-                    rua_eixo_feats.append({
-                        "type": "Feature",
-                        "geometry": json.loads(row.eixo.geojson),
-                        "properties": {"width_m": float(row.largura_m)},
-                    })
+                    rua_eixo_feats.append({"type":"Feature","geometry": json.loads(row.eixo.geojson),"properties":{"width_m": float(row.largura_m)}})
                 if getattr(row, "mask", None):
-                    if i < 3: _debug_geom(f"RUAS.mask[{i}]", row.mask)
-                    f = feat(row.mask, {"width_m": float(row.largura_m)})
-                    if f: rua_mask_feats.append(f)
-            except Exception as e:
-                print(f"[restricoes.detail][RUAS][{i}] ERROR: {e}")
+                    rua_mask_feats.append(feat(row.mask, {"width_m": float(row.largura_m)}))
+            except Exception:
+                pass
 
-        # --- Rios (centerline + faixa) ---
-        rios_centerline_feats, rios_faixa_feats = [], []
-        rios_qs = list(r.margens_rio.all())
-        print(f"[restricoes.detail] margens_rio_count={len(rios_qs)}")
-        for i, row in enumerate(rios_qs):
+        # Rios
+        rios_centerline_feats = []
+        rios_faixa_feats = []
+        for row in r.margens_rio.all():
             try:
                 if row.centerline:
-                    if i < 3: _debug_geom(f"RIO.centerline[{i}]", row.centerline)
-                    rios_centerline_feats.append({
-                        "type": "Feature",
-                        "geometry": json.loads(row.centerline.geojson),
-                        "properties": {"margem_m": float(row.margem_m)},
-                    })
+                    rios_centerline_feats.append({"type":"Feature","geometry": json.loads(row.centerline.geojson),"properties":{"margem_m": float(row.margem_m)}})
                 if row.faixa:
-                    if i < 3: _debug_geom(f"RIO.faixa[{i}]", row.faixa)
-                    f = feat(row.faixa, {"margem_m": float(row.margem_m)})
-                    if f: rios_faixa_feats.append(f)
-            except Exception as e:
-                print(f"[restricoes.detail][RIO][{i}] ERROR: {e}")
+                    rios_faixa_feats.append(feat(row.faixa, {"margem_m": float(row.margem_m)}))
+            except Exception:
+                pass
 
-        # --- LT (centerline + faixa) ---
+        # LT
         lt_centerline_feats, lt_faixa_feats = [], []
-        lt_qs = list(r.margens_lt.all())
-        print(f"[restricoes.detail] margens_lt_count={len(lt_qs)}")
-        for i, row in enumerate(lt_qs):
+        for row in r.margens_lt.all():
             try:
                 if row.centerline:
-                    if i < 3: _debug_geom(f"LT.centerline[{i}]", row.centerline)
-                    lt_centerline_feats.append({
-                        "type": "Feature",
-                        "geometry": json.loads(row.centerline.geojson),
-                        "properties": {"margem_m": float(row.margem_m)},
-                    })
+                    lt_centerline_feats.append({"type":"Feature","geometry": json.loads(row.centerline.geojson),"properties":{"margem_m": float(row.margem_m)}})
                 if row.faixa:
-                    if i < 3: _debug_geom(f"LT.faixa[{i}]", row.faixa)
-                    f = feat(row.faixa, {"margem_m": float(row.margem_m)})
-                    if f: lt_faixa_feats.append(f)
-            except Exception as e:
-                print(f"[restricoes.detail][LT][{i}] ERROR: {e}")
+                    lt_faixa_feats.append(feat(row.faixa, {"margem_m": float(row.margem_m)}))
+            except Exception:
+                pass
 
-        # --- Ferrovias (centerline + faixa) ---
+        # Ferrovias
         fer_centerline_feats, fer_faixa_feats = [], []
-        fer_qs = list(r.margens_ferrovia.all())
-        print(f"[restricoes.detail] margens_ferrovia_count={len(fer_qs)}")
-        for i, row in enumerate(fer_qs):
+        for row in r.margens_ferrovia.all():
             try:
                 if row.centerline:
-                    if i < 3: _debug_geom(f"FER.centerline[{i}]", row.centerline)
-                    fer_centerline_feats.append({
-                        "type": "Feature",
-                        "geometry": json.loads(row.centerline.geojson),
-                        "properties": {"margem_m": float(row.margem_m)},
-                    })
+                    fer_centerline_feats.append({"type":"Feature","geometry": json.loads(row.centerline.geojson),"properties":{"margem_m": float(row.margem_m)}})
                 if row.faixa:
-                    if i < 3: _debug_geom(f"FER.faixa[{i}]", row.faixa)
-                    f = feat(row.faixa, {"margem_m": float(row.margem_m)})
-                    if f: fer_faixa_feats.append(f)
-            except Exception as e:
-                print(f"[restricoes.detail][FER][{i}] ERROR: {e}")
+                    fer_faixa_feats.append(feat(row.faixa, {"margem_m": float(row.margem_m)}))
+            except Exception:
+                pass
 
-        # --- resumo final nos logs ---
-        print("[restricoes.detail] resumo:",
-              f"AV={len(av_feats)}",
-              f"CORTES={len(corte_feats)}",
-              f"RUAS_eixo={len(rua_eixo_feats)} RUAS_mask={len(rua_mask_feats)}",
-              f"RIOS_centerline={len(rios_centerline_feats)} RIOS_faixa={len(rios_faixa_feats)}",
-              f"LT_centerline={len(lt_centerline_feats)} LT_faixa={len(lt_faixa_feats)}",
-              f"FER_centerline={len(fer_centerline_feats)} FER_faixa={len(fer_faixa_feats)}",
-        )
+        # Área Loteável
+        loteavel_geom = getattr(r, "area_loteavel", None)
+        loteavel_fc = {"type":"FeatureCollection","features":[]}
+        if loteavel_geom and not loteavel_geom.empty:
+            try:
+                loteavel_fc["features"].append({
+                    "type":"Feature",
+                    "geometry": json.loads(loteavel_geom.geojson),
+                    "properties": {"area_m2": round(_area_m2(loteavel_geom), 2)},
+                })
+            except Exception:
+                pass
 
-        # --- payload de resposta ---
         data = {
             "restricoes_id": r.id,
             "project_id": r.project_id,
@@ -799,21 +783,25 @@ class RestricoesGeoDetailAPIView(APIView):
             "notes": r.notes,
             "created_at": r.created_at,
             "srid": SRID_WGS,
-            "aoi": aoi_geojson,
 
-            "av": fc(av_feats),
-            "corte_av": fc(corte_feats),
+            "aoi": json.loads(r.aoi_snapshot.geojson) if r.aoi_snapshot else None,
 
-            "ruas_eixo": fc(rua_eixo_feats),
-            "ruas_mask": fc(rua_mask_feats),
+            "av": fc([x for x in av_feats if x]),
+            "corte_av": fc([x for x in corte_feats if x]),
 
-            "rios_centerline": fc(rios_centerline_feats),
-            "rios_faixa": fc(rios_faixa_feats),
+            "ruas_eixo": fc([x for x in rua_eixo_feats if x]),
+            "ruas_mask": fc([x for x in rua_mask_feats if x]),
 
-            "lt_centerline": fc(lt_centerline_feats),
-            "lt_faixa": fc(lt_faixa_feats),
+            "rios_centerline": fc([x for x in rios_centerline_feats if x]),
+            "rios_faixa": fc([x for x in rios_faixa_feats if x]),
 
-            "ferrovias_centerline": fc(fer_centerline_feats),
-            "ferrovias_faixa": fc(fer_faixa_feats),
+            "lt_centerline": fc([x for x in lt_centerline_feats if x]),
+            "lt_faixa": fc([x for x in lt_faixa_feats if x]),
+
+            "ferrovias_centerline": fc([x for x in fer_centerline_feats if x]),
+            "ferrovias_faixa": fc([x for x in fer_faixa_feats if x]),
+
+            # NEW
+            "area_loteavel": loteavel_fc,
         }
-        return Response(data, status=200)
+        return Response(data, status=status.HTTP_200_OK)
