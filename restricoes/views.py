@@ -12,6 +12,13 @@ from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import IsAuthenticated
 
+
+from shapely.geometry import shape, mapping
+from shapely.ops import unary_union, snap
+from shapely.validation import make_valid as shapely_make_valid
+from pyproj import Transformer
+import math
+
 from django.contrib.gis.geos import GEOSGeometry, MultiPolygon, MultiLineString, Polygon
 from django.contrib.gis.geos import GeometryCollection
 
@@ -84,6 +91,29 @@ def _area_m2(mp_4674: GEOSGeometry) -> float:
 
 
 # ---------- Helpers mínimos e robustos ----------
+
+# --- GEOS <-> Shapely bridges ---
+def _geos_to_shp(g):
+    """GEOS -> Shapely"""
+    if not g or g.empty:
+        return None
+    try:
+        return shape(json.loads(g.geojson))
+    except Exception:
+        return None
+
+def _shp_to_geos(s, srid=SRID_WGS):
+    """Shapely -> GEOS (força SRID)"""
+    if s is None:
+        return None
+    try:
+        gj = mapping(s)
+        g = GEOSGeometry(json.dumps(gj))
+        g.srid = srid
+        return g
+    except Exception:
+        return None
+
 
 def _ensure_srid(g: GEOSGeometry, srid: int) -> GEOSGeometry:
     """Se g.srid estiver None, define para srid. Retorna um clone."""
@@ -302,14 +332,6 @@ def _buffer_meters_stable_clip_aoi(line_4674: GEOSGeometry, meters: float, aoi_4
     except Exception:
         return None
 
-def _centroid_log(g: GEOSGeometry, label: str):
-    try:
-        c = _to_srid(g, SRID_IN).centroid  # em 4326 para log
-        print(f"[restricoes] {label}: srid={g.srid} centroid(lon,lat)=({c.x:.6f},{c.y:.6f}) empty={g.empty}")
-    except Exception:
-        print(f"[restricoes] {label}: <centroid fail> srid={getattr(g,'srid',None)}")
-
-
 def _iter_fc(fc):
     if not fc or fc.get("type") != "FeatureCollection":
         return []
@@ -337,57 +359,122 @@ def _to_srid(g: GEOSGeometry, srid: int) -> GEOSGeometry:
         gg.transform(srid)
     return gg
 
-def _as_mpoly(g: GEOSGeometry) -> MultiPolygon:
-    if g.geom_type == "Polygon":
-        return MultiPolygon(g)
-    if g.geom_type == "MultiPolygon":
-        return g
-    raise ValueError(f"Esperado Polygon/MultiPolygon, recebi {g.geom_type}")
-
-def _as_mline(g: GEOSGeometry) -> MultiLineString:
-    if g.geom_type == "LineString":
-        return MultiLineString(g)
-    if g.geom_type == "MultiLineString":
-        return g
-    raise ValueError(f"Esperado LineString/MultiLineString, recebi {g.geom_type}")
-
-def _buffer_meters(g_any_srid: GEOSGeometry, meters: float, target_srid: int = SRID_WGS) -> MultiPolygon:
-    """
-    Buffer em metros com pipeline estável:
-      qualquer SRID -> 4326 -> 3857 -> buffer(m) -> 4326 -> target_srid
-    Retorna MultiPolygon em target_srid.
-    """
-    if not g_any_srid or meters is None or float(meters) <= 0:
-        raise ValueError("buffer_meters: geometria/metros inválidos")
-
-    g4326 = _to_srid(g_any_srid, SRID_IN)
-    g3857 = _to_srid(g4326, SRID_WEBMERC)
-    gb = g3857.buffer(float(meters))
-
-    # volta
-    if gb.srid != SRID_WEBMERC:
-        gb.transform(SRID_WEBMERC)
-    gb.transform(SRID_IN)
-    gb.transform(target_srid)
-
-    # garante MultiPolygon
-    if gb.geom_type == "Polygon":
-        return MultiPolygon(gb)
-    if gb.geom_type == "MultiPolygon":
-        return gb
-
-    # fallback via geojson
-    gj = GEOSGeometry(gb.geojson, srid=target_srid)
-    if gj.geom_type == "Polygon":
-        return MultiPolygon(gj)
-    if gj.geom_type == "MultiPolygon":
-        return gj
-    raise ValueError(f"Buffer resultou tipo inesperado: {gb.geom_type}")
-
 def _get_prop(props: Dict[str, Any], key: str, default: Any = None) -> Any:
     if not isinstance(props, dict):
         return default
     return props.get(key, default)
+
+# ---------- Remover Filete ------------
+
+def _pick_utm_epsg_from_lonlat(lon, lat):
+    zone = int(math.floor((lon + 180) / 6) + 1)
+    south = lat < 0
+    # SIRGAS 2000 / UTM zone N|S (EPSG 319xx/ 3198x no Brasil)
+    # Para simplificar, use 3197x Sul conforme zona:
+    # 31978..31985 (UTM 18S..25S). Ajuste se sua stack já usa 319xx específicos.
+    base = 31960  # 18S=31978 → 31960 + zone? Preferimos mapa explícito:
+    mapping_utm_sul = {18:31978, 19:31979, 20:31980, 21:31981, 22:31982, 23:31983, 24:31984, 25:31985}
+    if south and zone in mapping_utm_sul:
+        return mapping_utm_sul[zone]
+    # fallback universal métrico (WebMercator) se algo sair fora:
+    return 3857
+
+def _to_metric_transformers(geom_4674):
+    lon, lat = geom_4674.representative_point().x, geom_4674.representative_point().y
+    epsg = _pick_utm_epsg_from_lonlat(lon, lat)
+    fwd = Transformer.from_crs(4674, epsg, always_xy=True).transform
+    rev = Transformer.from_crs(epsg, 4674, always_xy=True).transform
+    return fwd, rev
+
+def _proj(geom, fn):
+    # shapely>=2: geom.transform(fn) existe; se estiver no shapely 1.8, use shapely.ops.transform
+    try:
+        return geom if geom is None else geom.transform(fn)
+    except Exception:
+        from shapely.ops import transform
+        return geom if geom is None else transform(fn, geom)
+
+def _clean_union(polys):
+    """
+    Aceita lista com GEOSGeometry ou Shapely e retorna Shapely geom unida/validada.
+    """
+    shp_list = []
+    for p in polys or []:
+        if not p:
+            continue
+        # Converte GEOS -> Shapely quando necessário
+        if hasattr(p, "geojson"):  # heurística simples: é GEOS
+            p = _geos_to_shp(p)
+        if p is None:
+            continue
+        if getattr(p, "is_empty", False):
+            continue
+        shp_list.append(p)
+
+    if not shp_list:
+        return None
+
+    u = unary_union(shp_list)
+    try:
+        u = shapely_make_valid(u)
+    except Exception:
+        pass
+    return (u if (u is not None and not u.is_empty) else None)
+
+
+def _drop_small_parts(geom, min_area_m2=0.05):
+    # remove cacos minúsculos pós-operação
+    if not geom or geom.is_empty:
+        return None
+    if geom.geom_type == "Polygon":
+        return geom if geom.area >= min_area_m2 else None
+    if geom.geom_type == "MultiPolygon":
+        parts = [p for p in geom.geoms if p.area >= min_area_m2]
+        if not parts:
+            return None
+        from shapely.geometry import MultiPolygon
+        return MultiPolygon(parts)
+    return geom
+def robust_diff_m(aoi_4674, excl_4674, snap_tol_m=0.05, eps_m=0.02, min_area_m2=0.05):
+    """
+    AOI − EXCL, evitando 'filetes' por snapping + fechamento morfológico.
+    - snap_tol_m: tolerância para snap de vértices (≈ 5 cm)
+    - eps_m: epsilon para dilatar/erodir (≈ 2 cm)
+    - min_area_m2: remove partículas abaixo desse limiar
+    """
+    if not aoi_4674 or aoi_4674.is_empty:
+        return None
+    if not excl_4674 or excl_4674.is_empty:
+        return shapely_make_valid(aoi_4674)
+
+    fwd, rev = _to_metric_transformers(aoi_4674)
+    aoi_m  = _proj(shapely_make_valid(aoi_4674), fwd)
+    excl_m = _proj(shapely_make_valid(excl_4674), fwd)
+
+    # 1) Snap bidirecional
+    aoi_s  = snap(aoi_m,  excl_m, snap_tol_m)
+    excl_s = snap(excl_m, aoi_s,  snap_tol_m)
+
+    # 2) Fechamento morfológico contra frestas
+    #    AOI − buffer+(EXCL, eps)  → depois erode o resultado em eps
+    excl_grow = excl_s.buffer(eps_m)
+    diff_raw  = aoi_s.difference(excl_grow)
+
+    # 3) Erosão p/ compensar a dilatação
+    diff_fix  = diff_raw.buffer(-eps_m)
+
+    # 4) Clean & filter
+    try:
+        diff_fix = shapely_make_valid(diff_fix)
+    except Exception:
+        pass
+    if diff_fix and not diff_fix.is_empty:
+        # remove fragmentos pequenos
+        diff_fix = _drop_small_parts(diff_fix, min_area_m2=min_area_m2)
+        # volta p/ 4674
+        return _proj(diff_fix, rev)
+    return None
+
 
 
 # ---------- CREATE versão (salva tudo: eixos + máscaras/faixas) ----------
@@ -610,9 +697,9 @@ class RestricoesCreateAPIView(APIView):
                 masks_polys.extend([row.faixa for row in rio_bulk if getattr(row, "faixa", None)])
                 masks_polys.extend([row.faixa for row in lt_bulk  if getattr(row, "faixa", None)])
                 masks_polys.extend([row.faixa for row in fer_bulk if getattr(row, "faixa", None)])
-                union_masks = _union_mpolys_4674(masks_polys)
+                union_masks = _union_mpolys_4674(masks_polys)  # GEOS MP 4674 ou None
 
-                # 2) AV efetiva
+                # 2) AV efetiva (continua em GEOS)
                 av_polys    = [row.geom for row in av_bulk]      # AV (MP 4674)
                 corte_polys = [row.geom for row in corte_bulk]   # Cortes
                 av_total    = _union_mpolys_4674(av_polys)
@@ -629,11 +716,18 @@ class RestricoesCreateAPIView(APIView):
                     else:
                         av_efetiva = av_total
 
-                # 3) Subtração total
-                excl = _union_mpolys_4674([x for x in [union_masks, av_efetiva] if x])
+                # 3) Excluídos (Shapely) — unifica GEOS -> Shapely
+                excl_shp = _clean_union([x for x in [union_masks, av_efetiva] if x])
 
-                # 4) Loteável
-                loteavel = _diff_clip(aoi_snapshot, excl)
+                # 4) Loteável (robusto em metros, tudo Shapely)
+                aoi_shp = _geos_to_shp(aoi_snapshot)
+                loteavel_shp = robust_diff_m(aoi_shp, excl_shp,
+                                            snap_tol_m=0.05,
+                                            eps_m=0.02,
+                                            min_area_m2=0.05)
+
+                # 4.1) Converter Shapely -> GEOS e normalizar para MultiPolygon 4674
+                loteavel = _ensure_mpoly_4674(_shp_to_geos(loteavel_shp, srid=SRID_WGS)) if loteavel_shp else None
 
                 # 5) Persistir
                 r.area_loteavel = loteavel if loteavel and not loteavel.empty else None
@@ -643,6 +737,7 @@ class RestricoesCreateAPIView(APIView):
                     print(f"[restricoes] loteavel area_m2={_area_m2(r.area_loteavel):.2f}")
             except Exception as e:
                 print(f"[restricoes] erro ao gerar area_loteavel: {e}")
+
 
             # ----------------- resumo p/ resposta -----------------
             qs = (
@@ -685,12 +780,6 @@ class RestricoesListByProjectAPIView(ListAPIView):
 
 
 # ---------- DETAIL GeoJSON (inclui eixos e faixas/máscaras) ----------
-
-from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from django.shortcuts import get_object_or_404
-import json
 
 class RestricoesGeoDetailAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
