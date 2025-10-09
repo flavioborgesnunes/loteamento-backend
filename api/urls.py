@@ -13,27 +13,18 @@ from restricoes import views as restricoes_views
 from rios import views as rios_views
 # Apps existentes
 from userauth import views as userauths_views
+from parcelamento.views import PlanoViewSet, VersaoViewSet
 
-# ------------------------------------------------------------------------------
-# DRF Router para os endpoints de "restricoes"
-# ------------------------------------------------------------------------------
+# Parcelamento: mapeia métodos HTTP → ações do ViewSet
+plano_list     = PlanoViewSet.as_view({"get": "list", "post": "create"})
+plano_detail   = PlanoViewSet.as_view({"get": "retrieve", "patch": "partial_update", "put": "update", "delete": "destroy"})
+plano_preview  = PlanoViewSet.as_view({"post": "preview"})
+plano_material = PlanoViewSet.as_view({"post": "materializar"})
 
-# restricoes_router = DefaultRouter()
-# restricoes_router.register(
-#     r"av", restricoes_views.AreaVerdeViewSet, basename="av")
-# restricoes_router.register(
-#     r"corte-av", restricoes_views.CorteAreaVerdeViewSet, basename="corte-av")
-# restricoes_router.register(
-#     r"margem-rio", restricoes_views.MargemRioViewSet, basename="margem-rio")
-# restricoes_router.register(
-#     r"margem-lt", restricoes_views.MargemLTViewSet, basename="margem-lt")
-# restricoes_router.register(
-#     r"margem-ferrovia", restricoes_views.MargemFerroviaViewSet, basename="margem-ferrovia")
-# restricoes_router.register(
-#     r"ruas", restricoes_views.RuaViewSet, basename="ruas")
-# restricoes_router.register(
-#     r"al", restricoes_views.AreaLoteavelViewSet, basename="al")
-
+versao_list    = VersaoViewSet.as_view({"get": "list"})
+versao_detail  = VersaoViewSet.as_view({"get": "retrieve"})
+versao_geojson = VersaoViewSet.as_view({"get": "geojson"})
+versao_kml     = VersaoViewSet.as_view({"post": "kml"})
 
 # ------------------------------------------------------------------------------
 # URL patterns
@@ -72,4 +63,18 @@ urlpatterns = [
     path("projetos/<int:project_id>/restricoes/", restricoes_views.RestricoesCreateAPIView.as_view()),
     path("projetos/<int:project_id>/restricoes/list/", restricoes_views.RestricoesListByProjectAPIView.as_view()),
     path("restricoes/<int:restricoes_id>/geo/", restricoes_views.RestricoesGeoDetailAPIView.as_view()),
+    
+    # Parcelamento:
+    # Planos
+    path("parcelamento/planos/", plano_list, name="parcelamento-planos-list"),
+    path("parcelamento/planos/<int:pk>/", plano_detail, name="parcelamento-planos-detail"),
+    path("parcelamento/planos/<int:pk>/preview/", plano_preview, name="parcelamento-planos-preview"),
+    path("parcelamento/planos/<int:pk>/materializar/", plano_material, name="parcelamento-planos-materializar"),
+
+    # Versões
+    path("parcelamento/versoes/", versao_list, name="parcelamento-versoes-list"),
+    path("parcelamento/versoes/<int:pk>/", versao_detail, name="parcelamento-versoes-detail"),
+    path("parcelamento/versoes/<int:pk>/geojson/", versao_geojson, name="parcelamento-versoes-geojson"),
+    path("parcelamento/versoes/<int:pk>/kml/", versao_kml, name="parcelamento-versoes-kml"),
+    
 ]

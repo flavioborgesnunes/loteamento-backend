@@ -75,6 +75,7 @@ INSTALLED_APPS = [
     'geodata',
     'projetos',
     'restricoes',
+    'parcelamento',
 ]
 
 MIDDLEWARE = [
