@@ -8,6 +8,7 @@ from .models import (
     MargemRioV,
     MargemLTV,
     MargemFerroviaV,
+    ManualRestricaoV,
 )
 
 
@@ -57,4 +58,9 @@ class MargemLTVAdmin(admin.ModelAdmin):
 @admin.register(MargemFerroviaV)
 class MargemFerroviaVAdmin(admin.ModelAdmin):
     list_display = ["id", "restricoes", "centerline", "margem_m", "faixa"]
+    list_filter = ["restricoes"]
+
+@admin.register(ManualRestricaoV)
+class MargemFerroviaVAdmin(admin.ModelAdmin):
+    list_display = ["id", "restricoes"]
     list_filter = ["restricoes"]

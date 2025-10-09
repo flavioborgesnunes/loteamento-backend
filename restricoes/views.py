@@ -1,5 +1,3 @@
-# restricoes/views.py
-
 from __future__ import annotations
 import json
 from typing import Any, Dict, List
@@ -12,7 +10,6 @@ from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import IsAuthenticated
 
-
 from shapely.geometry import shape, mapping
 from shapely.ops import unary_union, snap
 from shapely.validation import make_valid as shapely_make_valid
@@ -24,29 +21,25 @@ from django.contrib.gis.geos import GeometryCollection
 
 from .models import (
     Restricoes, AreaVerdeV, CorteAreaVerdeV, RuaV,
-    MargemRioV, MargemLTV, MargemFerroviaV, SRID_WGS
+    MargemRioV, MargemLTV, MargemFerroviaV, SRID_WGS,
+    ManualRestricaoV,  # ---- MANUAIS
 )
 from .serializers import RestricoesSerializer
 from projetos.models import Project
 
 SRID_IN = 4326
 SRID_WEBMERC = 3857
-
 SNAP_GRID = 1e-7
 
 # --- helpers para unir / diferenciar / medir ---
 
 def _union_mpolys_4674(polys) -> MultiPolygon | None:
-    """
-    União robusta de vários polígonos. Ignora None/empty.
-    Retorna MultiPolygon 4674 ou None.
-    """
     acc = None
     for p in polys or []:
         if not p:
             continue
         try:
-            mp = _norm_poly_4674(p)  # garante MP 4674
+            mp = _norm_poly_4674(p)
             if mp.empty:
                 continue
             acc = mp if acc is None else acc.union(mp)
@@ -57,9 +50,6 @@ def _union_mpolys_4674(polys) -> MultiPolygon | None:
     return _ensure_mpoly_4674(acc)
 
 def _diff_clip(aoi_mp_4674: MultiPolygon, sub_mp_4674: MultiPolygon | None) -> MultiPolygon | None:
-    """
-    Loteável = AOI \ Subtração. Garante MP 4674 e clip final pela AOI.
-    """
     if not aoi_mp_4674 or aoi_mp_4674.empty:
         return None
     if not sub_mp_4674 or sub_mp_4674.empty:
@@ -75,9 +65,6 @@ def _diff_clip(aoi_mp_4674: MultiPolygon, sub_mp_4674: MultiPolygon | None) -> M
         return None
 
 def _area_m2(mp_4674: GEOSGeometry) -> float:
-    """
-    Área aproximada em m² via 3857 (boa o suficiente aqui).
-    """
     if not mp_4674 or mp_4674.empty:
         return 0.0
     g = mp_4674.clone()
@@ -88,13 +75,9 @@ def _area_m2(mp_4674: GEOSGeometry) -> float:
     except Exception:
         return 0.0
 
-
-
 # ---------- Helpers mínimos e robustos ----------
 
-# --- GEOS <-> Shapely bridges ---
 def _geos_to_shp(g):
-    """GEOS -> Shapely"""
     if not g or g.empty:
         return None
     try:
@@ -103,7 +86,6 @@ def _geos_to_shp(g):
         return None
 
 def _shp_to_geos(s, srid=SRID_WGS):
-    """Shapely -> GEOS (força SRID)"""
     if s is None:
         return None
     try:
@@ -114,9 +96,7 @@ def _shp_to_geos(s, srid=SRID_WGS):
     except Exception:
         return None
 
-
 def _ensure_srid(g: GEOSGeometry, srid: int) -> GEOSGeometry:
-    """Se g.srid estiver None, define para srid. Retorna um clone."""
     if not g:
         return g
     gg = g.clone()
@@ -125,7 +105,6 @@ def _ensure_srid(g: GEOSGeometry, srid: int) -> GEOSGeometry:
     return gg
 
 def _ensure_mpoly_4674(g: GEOSGeometry) -> MultiPolygon:
-    """Garante MultiPolygon com SRID 4674."""
     if not g:
         return g
     gg = _ensure_srid(g, SRID_WGS)
@@ -139,7 +118,6 @@ def _ensure_mpoly_4674(g: GEOSGeometry) -> MultiPolygon:
     if gg.geom_type == "MultiPolygon":
         gg.srid = SRID_WGS
         return gg
-    # último recurso: reinterpreta via geojson
     gj = GEOSGeometry(gg.geojson)
     gj.srid = SRID_WGS
     if gj.geom_type == "Polygon":
@@ -151,9 +129,7 @@ def _ensure_mpoly_4674(g: GEOSGeometry) -> MultiPolygon:
         return gj
     raise ValueError(f"_ensure_mpoly_4674: tipo inesperado {gg.geom_type}")
 
-
 def _debug_geom(label: str, g: GEOSGeometry):
-    """Loga bbox e centroid em 4326; tolera srid=None."""
     try:
         if not g or g.empty:
             print(f"[restricoes][{label}] EMPTY")
@@ -169,12 +145,10 @@ def _debug_geom(label: str, g: GEOSGeometry):
     except Exception as e:
         print(f"[restricoes][{label}] ERROR: {e}")
 
-SNAP_GRID = 1e-7  # ~1cm em 4326 (aprox), melhora robustez topológica
-
 def _force_2d(g: GEOSGeometry) -> GEOSGeometry:
     gg = g.clone()
     try:
-        gg = GEOSGeometry(gg.geojson, srid=gg.srid)  # descarta Z/M re-parsando
+        gg = GEOSGeometry(gg.geojson, srid=gg.srid)
     except Exception:
         pass
     return gg
@@ -186,7 +160,6 @@ def _make_valid(g: GEOSGeometry) -> GEOSGeometry:
         return g
 
 def _snap_4326_small(g: GEOSGeometry) -> GEOSGeometry:
-    """Snappa em 4326 para reduzir self-intersections numéricas."""
     gg = _to_srid(g, SRID_IN)
     try:
         return gg.snap_to_grid(SNAP_GRID)
@@ -194,29 +167,18 @@ def _snap_4326_small(g: GEOSGeometry) -> GEOSGeometry:
         return gg
 
 def _norm_line_4674(g: GEOSGeometry) -> MultiLineString:
-    """
-    Converte qualquer Line/MultiLine/GC de linhas para MultiLineString em SRID 4674,
-    preservando 2D, validando, snappando e *forçando* SRID no retorno.
-    """
-    # Se vier sem SRID, assume 4326
     if not getattr(g, "srid", None):
         try:
-            g = GEOSGeometry(g.geojson, srid=SRID_IN)  # 4326
+            g = GEOSGeometry(g.geojson, srid=SRID_IN)
         except Exception:
             g.srid = SRID_IN
-
     gg = _force_2d(g)
     gg = _make_valid(gg)
-
-    # make_valid pode “perder” SRID
     if not getattr(gg, "srid", None):
         gg.srid = SRID_IN
+    gg = _snap_4326_small(gg)
+    gg = _to_srid(gg, SRID_WGS)
 
-    # snap em 4326 e vai para 4674
-    gg = _snap_4326_small(gg)     # garante 4326
-    gg = _to_srid(gg, SRID_WGS)   # 4674
-
-    # Função auxiliar: sempre devolve MultiLineString 4674
     def _as_mls_4674(x: GEOSGeometry) -> MultiLineString:
         if x.geom_type == "LineString":
             ml = MultiLineString(x)
@@ -231,11 +193,9 @@ def _norm_line_4674(g: GEOSGeometry) -> MultiLineString:
                 if sub.geom_type == "LineString":
                     parts.append(sub)
                 elif sub.geom_type == "MultiLineString":
-                    # decompõe em LineStrings
                     parts.extend([ls for ls in sub])
             if not parts:
                 raise ValueError("GeometryCollection sem linhas")
-            # Garante que todas as partes estão em 4674
             fixed = []
             for ls in parts:
                 if ls.srid != SRID_WGS:
@@ -251,21 +211,17 @@ def _norm_line_4674(g: GEOSGeometry) -> MultiLineString:
         raise ValueError(f"Esperado LineString/MultiLineString, recebi {x.geom_type}")
 
     ml = _as_mls_4674(gg)
-    # trava de novo por garantia
     if not getattr(ml, "srid", None):
         ml.srid = SRID_WGS
     return ml
 
-
 def _norm_poly_4674(g: GEOSGeometry) -> MultiPolygon:
-    """Polygon/MultiPolygon/GC -> MultiPolygon 4674, 2D, validado, snappado e com SRID forçado."""
-    gg = _force_2d(_ensure_srid(g, SRID_IN))  # assume 4326 se None
+    gg = _force_2d(_ensure_srid(g, SRID_IN))
     gg = _make_valid(gg)
     if not getattr(gg, "srid", None):
         gg.srid = SRID_IN
     gg = _snap_4326_small(gg)
-    gg = _to_srid(gg, SRID_WGS)  # 4674
-
+    gg = _to_srid(gg, SRID_WGS)
     if gg.geom_type == "Polygon":
         mp = MultiPolygon(gg)
         mp.srid = SRID_WGS
@@ -274,14 +230,13 @@ def _norm_poly_4674(g: GEOSGeometry) -> MultiPolygon:
         gg.srid = SRID_WGS
         return gg
     if gg.geom_type == "GeometryCollection":
-        polys = [geom for geom in gg if geom.geom_type in ("Polygon","MultiPolygon")]
+        polys = [geom for geom in gg if geom.geom_type in ("Polygon", "MultiPolygon")]
         if not polys:
             raise ValueError("Sem Polygon em GeometryCollection")
         acc = None
         for p in polys:
-            p2 = _norm_poly_4674(p)  # já retorna MP 4674
+            p2 = _norm_poly_4674(p)
             acc = p2 if acc is None else acc.union(p2)
-        # union às vezes perde SRID → força
         acc = _ensure_srid(acc, SRID_WGS)
         if acc.geom_type == "Polygon":
             mp = MultiPolygon(acc)
@@ -292,18 +247,11 @@ def _norm_poly_4674(g: GEOSGeometry) -> MultiPolygon:
             return acc
     raise ValueError(f"Esperado Polygon/MultiPolygon, recebi {gg.geom_type}")
 
-
 def _buffer_meters_stable_clip_aoi(line_4674: GEOSGeometry, meters: float, aoi_4674: MultiPolygon) -> MultiPolygon | None:
-    """
-    Buffer em metros (3857) de uma linha (espera 4674) + clip pela AOI (4674),
-    devolvendo SEMPRE MultiPolygon com SRID 4674 (ou None se vazio).
-    """
     if not line_4674 or meters is None or float(meters) <= 0:
         return None
-
     line_4674 = _ensure_srid(line_4674, SRID_WGS)
     aoi_4674  = _ensure_mpoly_4674(aoi_4674)
-
     try:
         g4326 = _to_srid(line_4674, SRID_IN)
         g3857 = _to_srid(g4326, SRID_WEBMERC)
@@ -315,12 +263,10 @@ def _buffer_meters_stable_clip_aoi(line_4674: GEOSGeometry, meters: float, aoi_4
         gb = _ensure_srid(gb, SRID_WGS)
     except Exception:
         return None
-
     try:
-        gb = _norm_poly_4674(gb)  # já devolve MP 4674
+        gb = _norm_poly_4674(gb)
     except Exception:
         return None
-
     try:
         clipped = gb.intersection(aoi_4674)
         if not clipped or clipped.empty:
@@ -338,22 +284,14 @@ def _iter_fc(fc):
     return fc.get("features") or []
 
 def _from_geojson(geom_dict: Dict[str, Any], srid_default: int = SRID_IN) -> GEOSGeometry:
-    """
-    Cria GEOSGeometry a partir de dict GeoJSON e GARANTE srid=4326.
-    (Alguns ambientes retornam g.srid None ao parsear GeoJSON; aqui forçamos.)
-    """
     g = GEOSGeometry(json.dumps(geom_dict))
-    # Força 4326 sempre (independente do que vier)
     try:
-        g.srid = srid_default  # 4326
+        g.srid = srid_default
     except Exception:
-        # fallback extremo: reparse com WKT (raro)
         g = GEOSGeometry(g.wkt, srid=srid_default)
     return g
 
-
 def _to_srid(g: GEOSGeometry, srid: int) -> GEOSGeometry:
-    """Clona e transforma para o SRID desejado."""
     gg = g.clone()
     if gg.srid != srid:
         gg.transform(srid)
@@ -369,14 +307,9 @@ def _get_prop(props: Dict[str, Any], key: str, default: Any = None) -> Any:
 def _pick_utm_epsg_from_lonlat(lon, lat):
     zone = int(math.floor((lon + 180) / 6) + 1)
     south = lat < 0
-    # SIRGAS 2000 / UTM zone N|S (EPSG 319xx/ 3198x no Brasil)
-    # Para simplificar, use 3197x Sul conforme zona:
-    # 31978..31985 (UTM 18S..25S). Ajuste se sua stack já usa 319xx específicos.
-    base = 31960  # 18S=31978 → 31960 + zone? Preferimos mapa explícito:
     mapping_utm_sul = {18:31978, 19:31979, 20:31980, 21:31981, 22:31982, 23:31983, 24:31984, 25:31985}
     if south and zone in mapping_utm_sul:
         return mapping_utm_sul[zone]
-    # fallback universal métrico (WebMercator) se algo sair fora:
     return 3857
 
 def _to_metric_transformers(geom_4674):
@@ -387,7 +320,6 @@ def _to_metric_transformers(geom_4674):
     return fwd, rev
 
 def _proj(geom, fn):
-    # shapely>=2: geom.transform(fn) existe; se estiver no shapely 1.8, use shapely.ops.transform
     try:
         return geom if geom is None else geom.transform(fn)
     except Exception:
@@ -395,25 +327,19 @@ def _proj(geom, fn):
         return geom if geom is None else transform(fn, geom)
 
 def _clean_union(polys):
-    """
-    Aceita lista com GEOSGeometry ou Shapely e retorna Shapely geom unida/validada.
-    """
     shp_list = []
     for p in polys or []:
         if not p:
             continue
-        # Converte GEOS -> Shapely quando necessário
-        if hasattr(p, "geojson"):  # heurística simples: é GEOS
+        if hasattr(p, "geojson"):
             p = _geos_to_shp(p)
         if p is None:
             continue
         if getattr(p, "is_empty", False):
             continue
         shp_list.append(p)
-
     if not shp_list:
         return None
-
     u = unary_union(shp_list)
     try:
         u = shapely_make_valid(u)
@@ -421,9 +347,7 @@ def _clean_union(polys):
         pass
     return (u if (u is not None and not u.is_empty) else None)
 
-
 def _drop_small_parts(geom, min_area_m2=0.05):
-    # remove cacos minúsculos pós-operação
     if not geom or geom.is_empty:
         return None
     if geom.geom_type == "Polygon":
@@ -432,16 +356,11 @@ def _drop_small_parts(geom, min_area_m2=0.05):
         parts = [p for p in geom.geoms if p.area >= min_area_m2]
         if not parts:
             return None
-        from shapely.geometry import MultiPolygon
-        return MultiPolygon(parts)
+        from shapely.geometry import MultiPolygon as ShpMP
+        return ShpMP(parts)
     return geom
+
 def robust_diff_m(aoi_4674, excl_4674, snap_tol_m=0.05, eps_m=0.02, min_area_m2=0.05):
-    """
-    AOI − EXCL, evitando 'filetes' por snapping + fechamento morfológico.
-    - snap_tol_m: tolerância para snap de vértices (≈ 5 cm)
-    - eps_m: epsilon para dilatar/erodir (≈ 2 cm)
-    - min_area_m2: remove partículas abaixo desse limiar
-    """
     if not aoi_4674 or aoi_4674.is_empty:
         return None
     if not excl_4674 or excl_4674.is_empty:
@@ -451,33 +370,23 @@ def robust_diff_m(aoi_4674, excl_4674, snap_tol_m=0.05, eps_m=0.02, min_area_m2=
     aoi_m  = _proj(shapely_make_valid(aoi_4674), fwd)
     excl_m = _proj(shapely_make_valid(excl_4674), fwd)
 
-    # 1) Snap bidirecional
     aoi_s  = snap(aoi_m,  excl_m, snap_tol_m)
     excl_s = snap(excl_m, aoi_s,  snap_tol_m)
 
-    # 2) Fechamento morfológico contra frestas
-    #    AOI − buffer+(EXCL, eps)  → depois erode o resultado em eps
     excl_grow = excl_s.buffer(eps_m)
     diff_raw  = aoi_s.difference(excl_grow)
-
-    # 3) Erosão p/ compensar a dilatação
     diff_fix  = diff_raw.buffer(-eps_m)
 
-    # 4) Clean & filter
     try:
         diff_fix = shapely_make_valid(diff_fix)
     except Exception:
         pass
     if diff_fix and not diff_fix.is_empty:
-        # remove fragmentos pequenos
         diff_fix = _drop_small_parts(diff_fix, min_area_m2=min_area_m2)
-        # volta p/ 4674
         return _proj(diff_fix, rev)
     return None
 
-
-
-# ---------- CREATE versão (salva tudo: eixos + máscaras/faixas) ----------
+# ---------- CREATE versão ----------
 
 class RestricoesCreateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -485,14 +394,12 @@ class RestricoesCreateAPIView(APIView):
     def post(self, request, project_id: int, *args, **kwargs):
         proj = get_object_or_404(Project, pk=project_id)
 
-        # ---- campos básicos
         label = request.data.get("label", "") or ""
         notes = request.data.get("notes", "") or ""
         percent_permitido = request.data.get("percent_permitido", None)
         corte_pct_cache = request.data.get("corte_pct_cache", None)
         source = request.data.get("source", "geoman")
 
-        # ---- ad hoc
         ad_hoc = request.data.get("adHoc") or {}
         aoi_in = ad_hoc.get("aoi")
         if not aoi_in:
@@ -500,28 +407,26 @@ class RestricoesCreateAPIView(APIView):
                             status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            aoi_g = _from_geojson(aoi_in)           # força 4326
-            aoi_snapshot = _ensure_mpoly_4674(aoi_g)  # MP 4674
+            aoi_g = _from_geojson(aoi_in)
+            aoi_snapshot = _ensure_mpoly_4674(aoi_g)
             _debug_geom("AOI", aoi_snapshot)
         except Exception as e:
             return Response({"detail": f"AOI inválida: {e}"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Collections
-        av_fc   = ad_hoc.get("av") or {}
-        corte_fc= ad_hoc.get("corte_av") or {}
-        ruas_fc = ad_hoc.get("ruas") or {}
-        rios_fc = ad_hoc.get("rios") or {}
-        lt_fc   = ad_hoc.get("lt") or {}
-        fer_fc  = ad_hoc.get("ferrovias") or {}
+        av_fc        = ad_hoc.get("av") or {}
+        corte_fc     = ad_hoc.get("corte_av") or {}
+        ruas_fc      = ad_hoc.get("ruas") or {}
+        rios_fc      = ad_hoc.get("rios") or {}
+        lt_fc        = ad_hoc.get("lt") or {}
+        fer_fc       = ad_hoc.get("ferrovias") or {}
+        manuais_fc   = ad_hoc.get("manuais") or {}   # ---- MANUAIS
 
-        # Defaults
         default_rua_width = ad_hoc.get("default_rua_width", 12)
         def_margem_rio = ad_hoc.get("def_margem_rio", 30)
-        def_margem_lt = ad_hoc.get("def_margem_lt", 15)
+        def_margem_lt  = ad_hoc.get("def_margem_lt", 15)
         def_margem_fer = ad_hoc.get("def_margem_fer", 20)
 
         with transaction.atomic():
-            # Cria versão
             r = Restricoes.objects.create(
                 project=proj,
                 aoi_snapshot=aoi_snapshot,
@@ -533,11 +438,11 @@ class RestricoesCreateAPIView(APIView):
                 created_by=request.user if request.user.is_authenticated else None,
             )
 
-            # ----------------- Áreas Verdes (MultiPolygon 4674) -----------------
+            # AV
             av_bulk = []
             for feat in _iter_fc(av_fc):
                 geom = feat.get("geometry")
-                if not geom: 
+                if not geom:
                     continue
                 try:
                     g = _ensure_mpoly_4674(_from_geojson(geom))
@@ -547,11 +452,11 @@ class RestricoesCreateAPIView(APIView):
             if av_bulk:
                 AreaVerdeV.objects.bulk_create(av_bulk, batch_size=500)
 
-            # ----------------- Cortes de AV (MultiPolygon 4674) -----------------
+            # CORTES
             corte_bulk = []
             for feat in _iter_fc(corte_fc):
                 geom = feat.get("geometry")
-                if not geom: 
+                if not geom:
                     continue
                 try:
                     g = _ensure_mpoly_4674(_from_geojson(geom))
@@ -561,7 +466,7 @@ class RestricoesCreateAPIView(APIView):
             if corte_bulk:
                 CorteAreaVerdeV.objects.bulk_create(corte_bulk, batch_size=500)
 
-            # ----------------- Ruas: eixo + mask (clip na AOI) -----------------
+            # RUAS
             rua_bulk = []
             for feat in _iter_fc(ruas_fc):
                 geom = feat.get("geometry")
@@ -573,21 +478,18 @@ class RestricoesCreateAPIView(APIView):
                     largura = float(largura) if largura is not None else float(default_rua_width)
                 except Exception:
                     largura = float(default_rua_width or 12)
-
                 try:
                     eixo_raw = _from_geojson(geom)
-                    eixo = _norm_line_4674(eixo_raw)         # MLS 4674
+                    eixo = _norm_line_4674(eixo_raw)
                     if not getattr(eixo, "srid", None):
                         eixo.srid = SRID_WGS
                     _debug_geom("rua.eixo", eixo)
                 except Exception:
                     continue
-
                 mask = _buffer_meters_stable_clip_aoi(eixo, largura/2.0, aoi_snapshot)
                 if mask:
                     mask = _ensure_mpoly_4674(mask)
                 _debug_geom("rua.mask", mask)
-
                 try:
                     rua_bulk.append(RuaV(restricoes=r, eixo=eixo, largura_m=largura, mask=mask))
                 except TypeError:
@@ -595,7 +497,7 @@ class RestricoesCreateAPIView(APIView):
             if rua_bulk:
                 RuaV.objects.bulk_create(rua_bulk, batch_size=500)
 
-            # ----------------- Rios: centerline + faixa -----------------
+            # RIOS
             rio_bulk = []
             for feat in _iter_fc(rios_fc):
                 geom = feat.get("geometry")
@@ -607,7 +509,6 @@ class RestricoesCreateAPIView(APIView):
                     margem = float(margem_val) if margem_val is not None else float(def_margem_rio)
                 except Exception:
                     margem = float(def_margem_rio)
-
                 try:
                     line_raw = _from_geojson(geom)
                     line = _norm_line_4674(line_raw)
@@ -616,17 +517,15 @@ class RestricoesCreateAPIView(APIView):
                     _debug_geom("rio.centerline", line)
                 except Exception:
                     continue
-
                 faixa = _buffer_meters_stable_clip_aoi(line, margem, aoi_snapshot)
                 if faixa:
                     faixa = _ensure_mpoly_4674(faixa)
                 _debug_geom("rio.faixa", faixa)
-
                 rio_bulk.append(MargemRioV(restricoes=r, centerline=line, margem_m=margem, faixa=faixa))
             if rio_bulk:
                 MargemRioV.objects.bulk_create(rio_bulk, batch_size=500)
 
-            # ----------------- Linhas de Transmissão: centerline + faixa -----------------
+            # LT
             lt_bulk = []
             for feat in _iter_fc(lt_fc):
                 geom = feat.get("geometry")
@@ -638,7 +537,6 @@ class RestricoesCreateAPIView(APIView):
                     margem = float(margem_val) if margem_val is not None else float(def_margem_lt)
                 except Exception:
                     margem = float(def_margem_lt)
-
                 try:
                     line_raw = _from_geojson(geom)
                     line = _norm_line_4674(line_raw)
@@ -647,17 +545,15 @@ class RestricoesCreateAPIView(APIView):
                     _debug_geom("lt.centerline", line)
                 except Exception:
                     continue
-
                 faixa = _buffer_meters_stable_clip_aoi(line, margem, aoi_snapshot)
                 if faixa:
                     faixa = _ensure_mpoly_4674(faixa)
                 _debug_geom("lt.faixa", faixa)
-
                 lt_bulk.append(MargemLTV(restricoes=r, centerline=line, margem_m=margem, faixa=faixa))
             if lt_bulk:
                 MargemLTV.objects.bulk_create(lt_bulk, batch_size=500)
 
-            # ----------------- Ferrovias: centerline + faixa -----------------
+            # FERROVIAS
             fer_bulk = []
             for feat in _iter_fc(fer_fc):
                 geom = feat.get("geometry")
@@ -669,7 +565,6 @@ class RestricoesCreateAPIView(APIView):
                     margem = float(margem_val) if margem_val is not None else float(def_margem_fer)
                 except Exception:
                     margem = float(def_margem_fer)
-
                 try:
                     line_raw = _from_geojson(geom)
                     line = _norm_line_4674(line_raw)
@@ -678,30 +573,41 @@ class RestricoesCreateAPIView(APIView):
                     _debug_geom("fer.centerline", line)
                 except Exception:
                     continue
-
                 faixa = _buffer_meters_stable_clip_aoi(line, margem, aoi_snapshot)
                 if faixa:
                     faixa = _ensure_mpoly_4674(faixa)
                 _debug_geom("fer.faixa", faixa)
-
                 fer_bulk.append(MargemFerroviaV(restricoes=r, centerline=line, margem_m=margem, faixa=faixa))
             if fer_bulk:
                 MargemFerroviaV.objects.bulk_create(fer_bulk, batch_size=500)
 
-            # ----------------- ÁREA LOTEÁVEL -----------------
-            # Regra: Loteável = AOI − ( máscaras ∪ faixas ∪ (AV_total − Corte_total) )
+            # ---- MANUAIS (polígonos convertidos ou desenhados) ----
+            manuais_bulk = []
+            for feat in _iter_fc(manuais_fc):
+                geom = feat.get("geometry")
+                props = feat.get("properties") or {}
+                if not geom:
+                    continue
+                try:
+                    g = _ensure_mpoly_4674(_from_geojson(geom))
+                    nm = str(props.get("name") or props.get("nome") or "").strip()
+                    manuais_bulk.append(ManualRestricaoV(restricoes=r, name=nm, geom=g))
+                except Exception:
+                    continue
+            if manuais_bulk:
+                ManualRestricaoV.objects.bulk_create(manuais_bulk, batch_size=500)
+
+            # ---------- ÁREA LOTEÁVEL ----------
             try:
-                # 1) máscaras/faixas (infra)
                 masks_polys = []
                 masks_polys.extend([row.mask for row in rua_bulk if getattr(row, "mask", None)])
                 masks_polys.extend([row.faixa for row in rio_bulk if getattr(row, "faixa", None)])
                 masks_polys.extend([row.faixa for row in lt_bulk  if getattr(row, "faixa", None)])
                 masks_polys.extend([row.faixa for row in fer_bulk if getattr(row, "faixa", None)])
-                union_masks = _union_mpolys_4674(masks_polys)  # GEOS MP 4674 ou None
+                union_masks = _union_mpolys_4674(masks_polys)
 
-                # 2) AV efetiva (continua em GEOS)
-                av_polys    = [row.geom for row in av_bulk]      # AV (MP 4674)
-                corte_polys = [row.geom for row in corte_bulk]   # Cortes
+                av_polys    = [row.geom for row in av_bulk]
+                corte_polys = [row.geom for row in corte_bulk]
                 av_total    = _union_mpolys_4674(av_polys)
                 corte_total = _union_mpolys_4674(corte_polys)
                 av_efetiva  = None
@@ -716,20 +622,21 @@ class RestricoesCreateAPIView(APIView):
                     else:
                         av_efetiva = av_total
 
-                # 3) Excluídos (Shapely) — unifica GEOS -> Shapely
-                excl_shp = _clean_union([x for x in [union_masks, av_efetiva] if x])
+                # MANUAIS entram no excluído
+                manuais_polys = [row.geom for row in manuais_bulk]
+                union_manuais = _union_mpolys_4674(manuais_polys)
 
-                # 4) Loteável (robusto em metros, tudo Shapely)
+                excl_shp = _clean_union([x for x in [union_masks, av_efetiva, union_manuais] if x])
+
                 aoi_shp = _geos_to_shp(aoi_snapshot)
-                loteavel_shp = robust_diff_m(aoi_shp, excl_shp,
-                                            snap_tol_m=0.05,
-                                            eps_m=0.02,
-                                            min_area_m2=0.05)
+                loteavel_shp = robust_diff_m(
+                    aoi_shp, excl_shp,
+                    snap_tol_m=0.05,
+                    eps_m=0.02,
+                    min_area_m2=0.05
+                )
 
-                # 4.1) Converter Shapely -> GEOS e normalizar para MultiPolygon 4674
                 loteavel = _ensure_mpoly_4674(_shp_to_geos(loteavel_shp, srid=SRID_WGS)) if loteavel_shp else None
-
-                # 5) Persistir
                 r.area_loteavel = loteavel if loteavel and not loteavel.empty else None
                 r.save(update_fields=["area_loteavel"])
 
@@ -738,8 +645,6 @@ class RestricoesCreateAPIView(APIView):
             except Exception as e:
                 print(f"[restricoes] erro ao gerar area_loteavel: {e}")
 
-
-            # ----------------- resumo p/ resposta -----------------
             qs = (
                 Restricoes.objects
                 .filter(pk=r.pk)
@@ -756,7 +661,8 @@ class RestricoesCreateAPIView(APIView):
 
         data = RestricoesSerializer(qs).data
         return Response(data, status=status.HTTP_201_CREATED)
-# ---------- LIST versões por projeto ----------
+
+# ---------- LIST ----------
 
 class RestricoesListByProjectAPIView(ListAPIView):
     permission_classes = [IsAuthenticated]
@@ -778,8 +684,7 @@ class RestricoesListByProjectAPIView(ListAPIView):
             .order_by("-created_at")
         )
 
-
-# ---------- DETAIL GeoJSON (inclui eixos e faixas/máscaras) ----------
+# ---------- DETAIL ----------
 
 class RestricoesGeoDetailAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -787,9 +692,8 @@ class RestricoesGeoDetailAPIView(APIView):
     def get(self, request, restricoes_id: int, *args, **kwargs):
         r = get_object_or_404(Restricoes, pk=restricoes_id)
 
-        def fc(features): 
+        def fc(features):
             return {"type":"FeatureCollection","features":features}
-
         def feat(g, props=None):
             if not g:
                 return None
@@ -802,11 +706,9 @@ class RestricoesGeoDetailAPIView(APIView):
         if r.aoi_snapshot:
             _debug_geom("AOI", r.aoi_snapshot)
 
-        # AV / Cortes
         av_feats = [feat(row.geom) for row in r.areas_verdes.all()]
         corte_feats = [feat(row.geom) for row in r.cortes_av.all()]
 
-        # Ruas
         rua_eixo_feats, rua_mask_feats = [], []
         for row in r.ruas.all():
             try:
@@ -817,9 +719,7 @@ class RestricoesGeoDetailAPIView(APIView):
             except Exception:
                 pass
 
-        # Rios
-        rios_centerline_feats = []
-        rios_faixa_feats = []
+        rios_centerline_feats, rios_faixa_feats = [], []
         for row in r.margens_rio.all():
             try:
                 if row.centerline:
@@ -829,7 +729,6 @@ class RestricoesGeoDetailAPIView(APIView):
             except Exception:
                 pass
 
-        # LT
         lt_centerline_feats, lt_faixa_feats = [], []
         for row in r.margens_lt.all():
             try:
@@ -840,7 +739,6 @@ class RestricoesGeoDetailAPIView(APIView):
             except Exception:
                 pass
 
-        # Ferrovias
         fer_centerline_feats, fer_faixa_feats = [], []
         for row in r.margens_ferrovia.all():
             try:
@@ -851,7 +749,18 @@ class RestricoesGeoDetailAPIView(APIView):
             except Exception:
                 pass
 
-        # Área Loteável
+        # ---- MANUAIS
+        manuais_feats = []
+        for row in r.restricoes_manuais.all():
+            try:
+                manuais_feats.append({
+                    "type":"Feature",
+                    "geometry": json.loads(row.geom.geojson),
+                    "properties": {"name": row.name or ""},
+                })
+            except Exception:
+                pass
+
         loteavel_geom = getattr(r, "area_loteavel", None)
         loteavel_fc = {"type":"FeatureCollection","features":[]}
         if loteavel_geom and not loteavel_geom.empty:
@@ -890,7 +799,8 @@ class RestricoesGeoDetailAPIView(APIView):
             "ferrovias_centerline": fc([x for x in fer_centerline_feats if x]),
             "ferrovias_faixa": fc([x for x in fer_faixa_feats if x]),
 
-            # NEW
+            "manuais": fc([x for x in manuais_feats if x]),  # ---- MANUAIS
+
             "area_loteavel": loteavel_fc,
         }
         return Response(data, status=status.HTTP_200_OK)

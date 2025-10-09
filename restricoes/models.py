@@ -14,10 +14,9 @@ class Restricoes(models.Model):
     notes = models.TextField(blank=True, default="")
     percent_permitido = models.FloatField(null=True, blank=True)
     corte_pct_cache = models.FloatField(null=True, blank=True)
-    
+
     aoi_snapshot   = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
     area_loteavel  = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
-
 
     source = models.CharField(max_length=40, default="geoman")
     is_active = models.BooleanField(default=True)
@@ -30,9 +29,16 @@ class Restricoes(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.pk and not self.version:
-            last = (Restricoes.objects.filter(project=self.project).order_by("-version").values_list("version", flat=True).first())
+            last = (
+                Restricoes.objects
+                .filter(project=self.project)
+                .order_by("-version")
+                .values_list("version", flat=True)
+                .first()
+            )
             self.version = (last or 0) + 1
         return super().save(*args, **kwargs)
+
 
 class AreaVerdeV(models.Model):
     restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="areas_verdes")
@@ -41,6 +47,7 @@ class AreaVerdeV(models.Model):
     class Meta:
         indexes = [models.Index(fields=["restricoes"]), GistIndex(fields=["geom"])]
 
+
 class CorteAreaVerdeV(models.Model):
     restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="cortes_av")
     geom = models.MultiPolygonField(srid=SRID_WGS)
@@ -48,14 +55,20 @@ class CorteAreaVerdeV(models.Model):
     class Meta:
         indexes = [models.Index(fields=["restricoes"]), GistIndex(fields=["geom"])]
 
+
 class RuaV(models.Model):
     restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="ruas")
-    eixo = models.MultiLineStringField(srid=SRID_WGS)             # o que o front desenha
-    largura_m = models.FloatField(default=12.0)                   # o que o front informa
-    mask = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)  # “máscara” persistida (buffer largura/2)
+    eixo = models.MultiLineStringField(srid=SRID_WGS)
+    largura_m = models.FloatField(default=12.0)
+    mask = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     class Meta:
-        indexes = [models.Index(fields=["restricoes"]), GistIndex(fields=["eixo"]), GistIndex(fields=["mask"])]
+        indexes = [
+            models.Index(fields=["restricoes"]),
+            GistIndex(fields=["eixo"]),
+            GistIndex(fields=["mask"]),
+        ]
+
 
 class MargemRioV(models.Model):
     restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="margens_rio")
@@ -64,7 +77,12 @@ class MargemRioV(models.Model):
     faixa = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     class Meta:
-        indexes = [models.Index(fields=["restricoes"]), GistIndex(fields=["centerline"]), GistIndex(fields=["faixa"])]
+        indexes = [
+            models.Index(fields=["restricoes"]),
+            GistIndex(fields=["centerline"]),
+            GistIndex(fields=["faixa"]),
+        ]
+
 
 class MargemLTV(models.Model):
     restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="margens_lt")
@@ -73,7 +91,12 @@ class MargemLTV(models.Model):
     faixa = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     class Meta:
-        indexes = [models.Index(fields=["restricoes"]), GistIndex(fields=["centerline"]), GistIndex(fields=["faixa"])]
+        indexes = [
+            models.Index(fields=["restricoes"]),
+            GistIndex(fields=["centerline"]),
+            GistIndex(fields=["faixa"]),
+        ]
+
 
 class MargemFerroviaV(models.Model):
     restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="margens_ferrovia")
@@ -82,4 +105,22 @@ class MargemFerroviaV(models.Model):
     faixa = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     class Meta:
-        indexes = [models.Index(fields=["restricoes"]), GistIndex(fields=["centerline"]), GistIndex(fields=["faixa"])]
+        indexes = [
+            models.Index(fields=["restricoes"]),
+            GistIndex(fields=["centerline"]),
+            GistIndex(fields=["faixa"]),
+        ]
+
+
+# NOVO: Restrições manuais (polígonos desenhados ou círculos convertidos para polígono)
+class ManualRestricaoV(models.Model):
+    restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="restricoes_manuais")
+    name = models.CharField(max_length=120, blank=True, default="")
+    geom = models.MultiPolygonField(srid=SRID_WGS)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["restricoes"]),
+            GistIndex(fields=["geom"]),
+        ]
