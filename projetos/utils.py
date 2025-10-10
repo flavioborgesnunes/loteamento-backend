@@ -1,3 +1,4 @@
+# projetos/utils.py
 from __future__ import annotations
 
 import io
@@ -7,13 +8,19 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from django.contrib.gis.db.models import GeometryField
 from django.contrib.gis.db.models.functions import Intersection, MakeValid
-from django.contrib.gis.geos import GEOSGeometry, MultiPolygon
+from django.contrib.gis.geos import GEOSGeometry, MultiPolygon, WKBWriter
 from django.db import connection
 from django.db.models import F, Func, Value
 from django.utils.text import slugify
+
 # MODELS PostGIS
-from geodata.models import (Area, Cidade, LimiteFederal, LinhaTransmissao,
-                            MalhaFerroviaria)
+from geodata.models import (
+    Area,
+    Cidade,
+    LimiteFederal,
+    LinhaTransmissao,
+    MalhaFerroviaria,
+)
 from rios.models import Waterway
 
 try:
@@ -46,16 +53,37 @@ def _yield_ids_in_batches(qs_ids, batch_size=2000):
 
 
 def _to_geos(obj) -> GEOSGeometry:
+    """
+    Converte dict GeoJSON ou WKT/WKB/GeoJSON string em GEOSGeometry,
+    FORÇANDO 2D se vier com Z (ex.: KMZ/KML com lon,lat,alt).
+    Garante SRID=4326 e tenta validar.
+    """
+    # 1) Parse
     g = GEOSGeometry(json.dumps(obj) if isinstance(obj, dict) else obj)
+
+    # 2) SRID
     if g.srid is None:
         g.srid = 4326
-    if g.srid != 4326:
+    elif g.srid != 4326:
         g.transform(4326)
+
+    # 3) FORÇA 2D se vier com Z (caso típico de KMZ/KML)
+    try:
+        if getattr(g, "hasz", False):
+            w = WKBWriter()
+            w.outdim = 2
+            g = GEOSGeometry(w.write(g), srid=g.srid)
+    except Exception:
+        # fallback bruto: reconstroi via WKT (também remove Z)
+        g = GEOSGeometry(g.wkt, srid=g.srid)
+
+    # 4) Tenta validar (evita problemas posteriores em intersecções/simplify)
     if not g.valid:
         try:
             g = g.buffer(0)
         except Exception:
             pass
+
     return g
 
 
@@ -67,7 +95,16 @@ def _ensure_mp(g: GEOSGeometry) -> MultiPolygon:
     return g
 
 
+def _force2d_expr(expr):
+    """Envolve uma expressão SQL em ST_Force2D, garantindo 2D (SRID 4326)."""
+    return Func(expr, function="ST_Force2D", output_field=GeometryField(srid=4326))
+
+
 def _annotate_clip_simplify(qs, geom_expr, tol):
+    """
+    MakeValid → SimplifyPreserveTopology em 2D.
+    OBS: 'geom_expr' deve estar 2D (use _force2d_expr antes).
+    """
     qs = qs.annotate(geom_valid=MakeValid(geom_expr)).annotate(
         geom_simpl=Func(
             F("geom_valid"),
@@ -133,14 +170,13 @@ def _add_lines_to_kml(folder, geos_geom, line_color, name_prefix):
         ls.style.linestyle.color = line_color
         if m_vals:
             try:
-                ls.extendeddata.newdata(
-                    name="m_values", value=json.dumps(m_vals))
+                ls.extendeddata.newdata(name="m_values", value=json.dumps(m_vals))
             except Exception:
                 pass
 
 
 def _add_polygons_to_kml(folder, gj_geom, line_color, name_prefix, fill_alpha: int = 0):
-    """Polígonos com **preenchimento opcional** (por padrão 0 → só contorno)."""
+    """Polígonos com preenchimento opcional (padrão 0 → só contorno)."""
     def clean_ring(ring):
         out = []
         for pt in ring:
@@ -159,7 +195,6 @@ def _add_polygons_to_kml(folder, gj_geom, line_color, name_prefix, fill_alpha: i
         p.outerboundaryis = outer
         if holes:
             p.innerboundaryis = holes
-        # **AOI sem preencher**: fill=0; outras camadas podem usar alpha baixo se quiser
         p.style.polystyle.color = _color_a(fill_alpha, "white")
         p.style.polystyle.fill = 1 if fill_alpha > 0 else 0
         p.style.linestyle.color = line_color
@@ -174,8 +209,7 @@ def _add_polygons_to_kml(folder, gj_geom, line_color, name_prefix, fill_alpha: i
 
 
 def _overlay_palette(idx):
-    names = ["red", "orange", "yellow", "green",
-             "cyan", "blue", "purple", "white"]
+    names = ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "white"]
     name = names[idx % len(names)]
     line = getattr(simplekml.Color, name, simplekml.Color.white)
     return line
@@ -194,7 +228,7 @@ def build_kmz_from_payload(
 ) -> Tuple[bytes, str, str]:
     """
     Gera KML/KMZ com pastas:
-      - AOI (somente CONTORNO)  <-- não tampa as camadas
+      - AOI (somente CONTORNO)
       - Rios, LT, Ferrovias, Municípios, Áreas Federais, Áreas Estaduais (DB)
       - Overlays Secundários (ProjectFeature) em subpastas por overlay_id
     Usa recorte e simplificação no banco (ST_Intersection + ST_SimplifyPreserveTopology).
@@ -203,12 +237,14 @@ def build_kmz_from_payload(
         raise RuntimeError("simplekml não instalado. pip install simplekml")
 
     simplify = simplify or {}
-    tol_lines = float(simplify.get("lines", simplify.get(
-        "rios", simplify.get("lt", 0))) or 0) or 0.00002
-    tol_polys = float(simplify.get(
-        "polygons", simplify.get("polygon", 0)) or 0) or 0.00005
+    tol_lines = float(simplify.get("lines", simplify.get("rios", simplify.get("lt", 0))) or 0) or 0.00002
+    tol_polys = float(simplify.get("polygons", simplify.get("polygon", 0)) or 0) or 0.00005
 
+    # AOI garantidamente 2D + MultiPolygon
     aoi = _ensure_mp(_to_geos(aoi_geojson))
+    if getattr(aoi, "hasz", False):
+        w = WKBWriter(); w.outdim = 2
+        aoi = GEOSGeometry(w.write(aoi), srid=aoi.srid or 4326)
 
     kml = simplekml.Kml()
 
@@ -221,7 +257,7 @@ def build_kmz_from_payload(
             gj_geom=aoi_gj,
             line_color=simplekml.Color.cyan,
             name_prefix="AOI",
-            fill_alpha=0,           # <<<<<<<<<<<<<<  sem preenchimento
+            fill_alpha=0,  # sem preenchimento
         )
     except Exception:
         pass
@@ -243,9 +279,9 @@ def build_kmz_from_payload(
                     Waterway.objects
                     .filter(id__in=id_batch)
                     .annotate(clipped=Intersection("geom", Value(aoi, output_field=GeometryField(srid=4326))))
+                    .annotate(clipped2d=_force2d_expr(F("clipped")))
                 )
-                qs = _annotate_clip_simplify(
-                    qs, F("clipped"), tol_lines).only("id")
+                qs = _annotate_clip_simplify(qs, F("clipped2d"), tol_lines).only("id")
                 for row in qs:
                     for ln in _extract_lines(row.geom_simpl):
                         coords_xyz, m_vals = _coords_for_kml_line(ln)
@@ -258,8 +294,7 @@ def build_kmz_from_payload(
                         ls.style.linestyle.color = simplekml.Color.royalblue
                         if m_vals:
                             try:
-                                ls.extendeddata.newdata(
-                                    name="m_values", value=json.dumps(m_vals))
+                                ls.extendeddata.newdata(name="m_values", value=json.dumps(m_vals))
                             except Exception:
                                 pass
                         total += 1
@@ -282,24 +317,22 @@ def build_kmz_from_payload(
                     LinhaTransmissao.objects
                     .filter(id__in=id_batch)
                     .annotate(clipped=Intersection("geom", Value(aoi, output_field=GeometryField(srid=4326))))
+                    .annotate(clipped2d=_force2d_expr(F("clipped")))
                 )
-                qs = _annotate_clip_simplify(
-                    qs, F("clipped"), tol_lines).only("id")
+                qs = _annotate_clip_simplify(qs, F("clipped2d"), tol_lines).only("id")
                 for row in qs:
                     for ln in _extract_lines(row.geom_simpl):
                         coords_xyz, m_vals = _coords_for_kml_line(ln)
                         if not coords_xyz:
                             continue
                         if fld_lt is None:
-                            fld_lt = kml.newfolder(
-                                name="Linhas de Transmissão")
+                            fld_lt = kml.newfolder(name="Linhas de Transmissão")
                         ls = fld_lt.newlinestring(coords=coords_xyz)
                         ls.style.linestyle.width = 2
                         ls.style.linestyle.color = simplekml.Color.red
                         if m_vals:
                             try:
-                                ls.extendeddata.newdata(
-                                    name="m_values", value=json.dumps(m_vals))
+                                ls.extendeddata.newdata(name="m_values", value=json.dumps(m_vals))
                             except Exception:
                                 pass
                         total += 1
@@ -322,9 +355,9 @@ def build_kmz_from_payload(
                     MalhaFerroviaria.objects
                     .filter(id__in=id_batch)
                     .annotate(clipped=Intersection("geom", Value(aoi, output_field=GeometryField(srid=4326))))
+                    .annotate(clipped2d=_force2d_expr(F("clipped")))
                 )
-                qs = _annotate_clip_simplify(
-                    qs, F("clipped"), tol_lines).only("id")
+                qs = _annotate_clip_simplify(qs, F("clipped2d"), tol_lines).only("id")
                 for row in qs:
                     for ln in _extract_lines(row.geom_simpl):
                         coords_xyz, m_vals = _coords_for_kml_line(ln)
@@ -337,8 +370,7 @@ def build_kmz_from_payload(
                         ls.style.linestyle.color = simplekml.Color.black
                         if m_vals:
                             try:
-                                ls.extendeddata.newdata(
-                                    name="m_values", value=json.dumps(m_vals))
+                                ls.extendeddata.newdata(name="m_values", value=json.dumps(m_vals))
                             except Exception:
                                 pass
                         total += 1
@@ -361,9 +393,9 @@ def build_kmz_from_payload(
                     Cidade.objects
                     .filter(id__in=id_batch)
                     .annotate(clipped=Intersection("geom", Value(aoi, output_field=GeometryField(srid=4326))))
+                    .annotate(clipped2d=_force2d_expr(F("clipped")))
                 )
-                qs = _annotate_clip_simplify(
-                    qs, F("clipped"), tol_polys).only("id")
+                qs = _annotate_clip_simplify(qs, F("clipped2d"), tol_polys).only("id")
                 for row in qs:
                     gj = json.loads(row.geom_simpl.json)
                     if fld_cidades is None:
@@ -395,9 +427,9 @@ def build_kmz_from_payload(
                     LimiteFederal.objects
                     .filter(id__in=id_batch)
                     .annotate(clipped=Intersection("geom", Value(aoi, output_field=GeometryField(srid=4326))))
+                    .annotate(clipped2d=_force2d_expr(F("clipped")))
                 )
-                qs = _annotate_clip_simplify(
-                    qs, F("clipped"), tol_polys).only("id")
+                qs = _annotate_clip_simplify(qs, F("clipped2d"), tol_polys).only("id")
                 for row in qs:
                     gj = json.loads(row.geom_simpl.json)
                     if fld_fed is None:
@@ -431,9 +463,9 @@ def build_kmz_from_payload(
                     Area.objects
                     .filter(id__in=id_batch)
                     .annotate(clipped=Intersection("geom", Value(aoi, output_field=GeometryField(srid=4326))))
+                    .annotate(clipped2d=_force2d_expr(F("clipped")))
                 )
-                qs = _annotate_clip_simplify(
-                    qs, F("clipped"), tol_polys).only("id")
+                qs = _annotate_clip_simplify(qs, F("clipped2d"), tol_polys).only("id")
                 for row in qs:
                     gj = json.loads(row.geom_simpl.json)
                     if fld_est is None:
@@ -472,6 +504,14 @@ def build_kmz_from_payload(
                     g = pf.geom_simpl or pf.geom
                     if not g or g.empty:
                         continue
+                    # (em tese estes campos estão 2D; se quiser blindar:)
+                    if getattr(g, "hasz", False):
+                        try:
+                            w = WKBWriter(); w.outdim = 2
+                            g = GEOSGeometry(w.write(g), srid=g.srid or 4326)
+                        except Exception:
+                            g = GEOSGeometry(g.wkt, srid=g.srid or 4326)
+
                     nm = (pf.properties or {}).get("name") or overlay_id
                     if g.geom_type in ("LineString", "MultiLineString", "GeometryCollection"):
                         _add_lines_to_kml(sub, g, line_color, nm)
@@ -499,6 +539,5 @@ def build_kmz_from_payload(
             zinfo = zipfile.ZipInfo("mimetype")
             zinfo.compress_type = zipfile.ZIP_STORED
             zf.writestr(zinfo, b"application/vnd.google-earth.kmz")
-            zf.writestr("doc.kml", kml_bytes,
-                        compress_type=zipfile.ZIP_DEFLATED)
+            zf.writestr("doc.kml", kml_bytes, compress_type=zipfile.ZIP_DEFLATED)
         return buf.getvalue(), f"{base}.kmz", "application/vnd.google-earth.kmz"
