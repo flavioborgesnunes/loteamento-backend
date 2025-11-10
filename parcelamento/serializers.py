@@ -23,6 +23,7 @@ class ParametrosSerializer(serializers.Serializer):
     guia_linha_fc = serializers.JSONField(required=False)
     dist_min_rua_quarteirao_m = serializers.FloatField(required=False)
     tolerancia_frac = serializers.FloatField(required=False)
+    calcada_largura_m = serializers.FloatField(required=False, default=2.5)
 
 
 # --- payloads auxiliares para o /recalcular ---
@@ -90,9 +91,12 @@ class PreviewRequestSerializer(serializers.Serializer):
 
 
 class PreviewResponseSerializer(serializers.Serializer):
-    vias = serializers.JSONField()          # FC
-    quarteiroes = serializers.JSONField()   # FC
-    lotes = serializers.JSONField()         # FC
+    vias = serializers.JSONField()            # FC (linhas - eixos)
+    # FC (polígonos - áreas cinza SEM calçada)
+    vias_area = serializers.JSONField()
+    quarteiroes = serializers.JSONField()     # FC (polígonos)
+    lotes = serializers.JSONField()           # FC (polígonos com props)
+    calcadas = serializers.JSONField()        # FC (polígonos - faixa exclusiva)
     metrics = serializers.DictField()
 
 
