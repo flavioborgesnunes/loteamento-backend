@@ -76,6 +76,7 @@ INSTALLED_APPS = [
     'projetos',
     'restricoes',
     'parcelamento',
+    'iaparcelamento',
 ]
 
 MIDDLEWARE = [
@@ -204,6 +205,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 AUTH_USER_MODEL = 'userauth.User'
 
 GDAL_LIBRARY_PATH = "/usr/lib/x86_64-linux-gnu/libgdal.so.34"
+
+OPENAI_API_KEY = config("OPENAI_API_KEY")
+
+IAPARCELAMENTO_RAG_DIR = os.path.join(BASE_DIR, "iaparcelamento_rag")
+
+IAPARCELAMENTO_MODEL = "gpt-4.1-mini" 
 
 
 SIMPLE_JWT = {

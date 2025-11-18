@@ -14,6 +14,8 @@ from rios import views as rios_views
 # Apps existentes
 from userauth import views as userauths_views
 from parcelamento.views import PlanoViewSet, VersaoViewSet
+from iaparcelamento import views as ia_parcelamento_views
+
 
 # Parcelamento: mapeia métodos HTTP → ações do ViewSet
 plano_list     = PlanoViewSet.as_view({"get": "list", "post": "create"})
@@ -76,5 +78,23 @@ urlpatterns = [
     path("parcelamento/versoes/<int:pk>/", versao_detail, name="parcelamento-versoes-detail"),
     path("parcelamento/versoes/<int:pk>/geojson/", versao_geojson, name="parcelamento-versoes-geojson"),
     path("parcelamento/versoes/<int:pk>/kml/", versao_kml, name="parcelamento-versoes-kml"),
+    
+        # IA Parcelamento
+    path(
+        "ia-parcelamento/planos/<int:plano_id>/sugerir-parametros/",
+        ia_parcelamento_views.SugerirParametrosView.as_view(),
+        name="ia-parcelamento-sugerir-parametros",
+    ),
+    path(
+        "ia-parcelamento/planos/<int:plano_id>/preview/",
+        ia_parcelamento_views.PreviewIaView.as_view(),
+        name="ia-parcelamento-preview",
+    ),
+    path(
+        "ia-parcelamento/planos/<int:plano_id>/svg-preview/",
+        ia_parcelamento_views.SvgPreviewIaView.as_view(),
+        name="ia-parcelamento-svg-preview",
+    ),
+
     
 ]
