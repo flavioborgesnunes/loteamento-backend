@@ -1,9 +1,11 @@
-# services.py
 from __future__ import annotations
 
+import json
 import math
 from typing import Dict, List, Optional, Tuple
 
+from django.contrib.gis.geos import GEOSGeometry
+from parcelamento.commands.executor import executar_comandos_pre
 from pyproj import Transformer
 from shapely import affinity
 from shapely.geometry import (LineString, MultiLineString, MultiPolygon, Point,
@@ -11,6 +13,8 @@ from shapely.geometry import (LineString, MultiLineString, MultiPolygon, Point,
 from shapely.ops import split
 from shapely.ops import transform as shp_transform
 from shapely.ops import unary_union
+
+from .commands.executor import executar_comandos_pre
 
 # ------------------------------------------------------------------------------
 # Utils básicos
@@ -44,6 +48,7 @@ def shapely_transform(geom, transformer: Transformer):
     def _tx_xy(x, y, z=None):
         x2, y2 = transformer.transform(x, y)
         return (x2, y2) if z is None else (x2, y2, z)
+
     return shp_transform(_tx_xy, geom)
 
 
@@ -140,7 +145,9 @@ def _buffer_centerlines_with_attr(
     return u if not u.is_empty else None
 
 
-def _extract_centerlines_m(ruas_eixo_fc: Optional[dict], tf_wgs_to_m: Transformer) -> List[LineString]:
+def _extract_centerlines_m(
+    ruas_eixo_fc: Optional[dict], tf_wgs_to_m: Transformer
+) -> List[LineString]:
     """
     Extrai eixos (LineString) em metros a partir do FC de eixos.
     Ignora features não-lineares silenciosamente.
@@ -154,8 +161,10 @@ def _extract_centerlines_m(ruas_eixo_fc: Optional[dict], tf_wgs_to_m: Transforme
             if isinstance(g, LineString) and not g.is_empty:
                 lines.append(g)
             elif isinstance(g, MultiLineString) and not g.is_empty:
-                lines.extend([seg for seg in g.geoms if isinstance(
-                    seg, LineString) and not seg.is_empty])
+                lines.extend(
+                    [seg for seg in g.geoms if isinstance(
+                        seg, LineString) and not seg.is_empty]
+                )
         except Exception:
             pass
     return lines
@@ -174,6 +183,7 @@ def _angle_diff(a: float, b: float) -> float:
 # ------------------------------------------------------------------------------
 # Malha viária + quarteirões + calçadas
 # ------------------------------------------------------------------------------
+
 
 def _vias_area_from_components(al_m, roads_union_m, trav_corr, paral_corr):
     """
@@ -227,6 +237,7 @@ def _calcadas_ao_redor_dos_quarteiroes(
 # Lógica principal (vias/quarteirões/calçadas) em 3 cenários
 # ------------------------------------------------------------------------------
 
+
 def build_road_and_blocks(
     al_wgs_geojson: dict, params: dict, srid_calc: int = 3857
 ) -> Tuple[dict, dict, dict, dict]:
@@ -237,13 +248,6 @@ def build_road_and_blocks(
     - quarteiroes_fc: polígonos (já afastados pela calçada)
     - calcadas_fc: polígonos (faixa exclusiva), NÃO ocupa rua nem quarteirão
     - vias_area_fc: áreas de PAVIMENTO da via (cinza) — **sem** calçada
-
-    REGRAS:
-    - Distância entre quarteirões = largura_rua + 2 * calcada_largura_m
-    - vias_area_fc mostra apenas o pavimento (ex.: 5 m), sem a calçada
-    - calcadas_fc representa a faixa entre o pavimento e o quarteirão (ex.: 2 m de cada lado)
-    - **Com ruas existentes**: o comprimento dos quarteirões é medido **entre travessas existentes**;
-      só se cria nova travessa se o vão exceder `compr_max_quarteirao_m`.
     """
     tf_wgs_to_m = Transformer.from_crs(4326, srid_calc, always_xy=True)
     tf_m_to_wgs = Transformer.from_crs(srid_calc, 4326, always_xy=True)
@@ -275,7 +279,8 @@ def build_road_and_blocks(
         ruas_eixo_fc, tf_wgs_to_m, larg_v)
     if roads_axis_buffer:
         roads_union_m = roads_axis_buffer if roads_union_m is None else unary_union(
-            [roads_union_m, roads_axis_buffer])
+            [roads_union_m, roads_axis_buffer]
+        )
 
     # =========================
     # CASO 1: há ruas reais
@@ -305,7 +310,8 @@ def build_road_and_blocks(
                 if _angle_diff(ang, (angle_roads + 90.0) % 180.0) <= 20.0:
                     # Posição X no sistema alinhado às "principais"
                     ln_al = affinity.rotate(
-                        ln, -angle_roads, origin=origin, use_radians=False)
+                        ln, -angle_roads, origin=origin, use_radians=False
+                    )
                     existing_cross_positions.append(ln_al.centroid.x)
 
         # Rotaciona AL e RUAS para medir ao longo do eixo X (comprimento)
@@ -316,8 +322,13 @@ def build_road_and_blocks(
         # Limpa/ordena as posições conhecidas de travessas
         if existing_cross_positions:
             # inclui limites da AL para fatiar os vãos nas bordas
-            xs = sorted(set(round(
-                x, 3) for x in existing_cross_positions if axmin - 1e-6 <= x <= axmax + 1e-6))
+            xs = sorted(
+                set(
+                    round(x, 3)
+                    for x in existing_cross_positions
+                    if axmin - 1e-6 <= x <= axmax + 1e-6
+                )
+            )
             anchors = [axmin] + xs + [axmax]
             # Para cada vão entre travessas existentes, inserir novas a cada comp_max
             for i in range(len(anchors) - 1):
@@ -327,14 +338,17 @@ def build_road_and_blocks(
                     k = 1
                     while x0 + k * comp_max < x1 - 1e-6:
                         xk = x0 + k * comp_max
-                        trav_lines_al.append(LineString(
-                            [(xk, aymin - 2 * comp_max), (xk, aymax + 2 * comp_max)]))
+                        trav_lines_al.append(
+                            LineString(
+                                [(xk, aymin - 2 * comp_max),
+                                 (xk, aymax + 2 * comp_max)]
+                            )
+                        )
                         k += 1
                 # se gap ≤ comp_max, não cria travessa (respeita existentes)
         else:
             # Sem eixos perpendiculares informados → fallback: grade regular,
-            # mas ainda **referenciada** aos limites da AL (não ao bounding de ruas),
-            # o que evita travessas super densas dentro de vãos curtos.
+            # ainda referenciada aos limites da AL.
             span_x = max(0.0, axmax - axmin)
             if comp_max > 0:
                 n = int(math.floor(span_x / comp_max))
@@ -345,8 +359,12 @@ def build_road_and_blocks(
             for k in range(1, n + 1):
                 xk = axmin + margin + k * comp_max
                 if axmin < xk < axmax:
-                    trav_lines_al.append(LineString(
-                        [(xk, aymin - 2 * comp_max), (xk, aymax + 2 * comp_max)]))
+                    trav_lines_al.append(
+                        LineString(
+                            [(xk, aymin - 2 * comp_max),
+                             (xk, aymax + 2 * comp_max)]
+                        )
+                    )
 
         # Desfaz rotação para o mundo
         def _unrot(g):
@@ -365,7 +383,8 @@ def build_road_and_blocks(
         # ---------- Ruas paralelas às existentes (regra 2 profundidades) ----------
         spacing_vias = 2 * prof_min + larg_v + 2 * calcada_w
         fam_paral = _gen_parallel_lines_covering_bbox(
-            al_m.bounds, spacing_vias, angle_roads, origin)
+            al_m.bounds, spacing_vias, angle_roads, origin
+        )
         paral_corr = buffer_lines_as_corridors(fam_paral, larg_v)
         paral_corr = [c.intersection(al_clean)
                       for c in paral_corr if not c.is_empty]
@@ -390,20 +409,26 @@ def build_road_and_blocks(
             if pav.is_empty:
                 return None, None, None
             expandidas = [
-                p.buffer(max(calcada_w, 0.0), cap_style=2, join_style=2) for p in base]
+                p.buffer(max(calcada_w, 0.0), cap_style=2, join_style=2) for p in base
+            ]
             total = unary_union(expandidas).intersection(al_m)
             calc = None
             if total and not total.is_empty:
                 diff = total.difference(pav)
                 if diff and not diff.is_empty:
-                    if isinstance(diff, (Polygon, MultiPolygon)) or getattr(diff, "geom_type", "").endswith("Polygon"):
+                    if isinstance(diff, (Polygon, MultiPolygon)) or getattr(
+                        diff, "geom_type", ""
+                    ).endswith("Polygon"):
                         calc = diff
-            return (pav if (pav and not pav.is_empty) else None,
-                    total if (total and not total.is_empty) else None,
-                    calc if (calc and not calc.is_empty) else None)
+            return (
+                pav if (pav and not pav.is_empty) else None,
+                total if (total and not total.is_empty) else None,
+                calc if (calc and not calc.is_empty) else None,
+            )
 
         vias_pav_m, vias_total_m, calcadas_union = _vias_pav_e_total(
-            pav_parts, al_m, calcada_w)
+            pav_parts, al_m, calcada_w
+        )
 
         # Quarteirões = AL - (rua + calçada)
         if vias_total_m and not vias_total_m.is_empty:
@@ -413,51 +438,105 @@ def build_road_and_blocks(
 
         # Eixos de vias (linhas) para exibição
         vias_lines = []
+        # Travessas (aprox. horizontais, perpendiculares às principais)
         for l in fam_trav_world:
             cl = l.intersection(al_m).difference(roads_union_m)
             if not cl.is_empty:
                 vias_lines.append(
-                    {"tipo": "horizontal", "largura_m": larg_h, "geom": cl})
+                    {
+                        "tipo": "horizontal",
+                        "largura_m": larg_h,
+                        "geom": cl,
+                        "orientacao_graus": (angle_roads + 90.0) % 180.0,
+                    }
+                )
+        # Paralelas às principais (aprox. verticais)
         for l in fam_paral:
             cl = l.intersection(al_m).difference(roads_union_m)
             if not cl.is_empty:
                 vias_lines.append(
-                    {"tipo": "vertical", "largura_m": larg_v, "geom": cl})
+                    {
+                        "tipo": "vertical",
+                        "largura_m": larg_v,
+                        "geom": cl,
+                        "orientacao_graus": angle_roads % 180.0,
+                    }
+                )
 
         # FCs
         vias_fc = {
             "type": "FeatureCollection",
-            "features": [
+            "features": [],
+        }
+        for idx, v in enumerate(vias_lines, start=1):
+            geom_wgs = _to_wgs(v["geom"])
+            props = {
+                "via_id": f"via_{idx}",
+                "tipo": v["tipo"],
+                "largura_m": v["largura_m"],
+                # categoria padrão - depois pode ser ajustada por IA/usuário
+                "categoria": "local",
+                "orientacao_graus": round(float(v["orientacao_graus"]) % 180.0, 2),
+                # origem de geração para IA/backend
+                "origem": "heuristica",
+                "ia_metadata": {},
+            }
+            vias_fc["features"].append(
                 {
                     "type": "Feature",
-                    "properties": {"tipo": v["tipo"], "largura_m": v["largura_m"]},
-                    "geometry": mapping(_to_wgs(v["geom"])),
+                    "properties": props,
+                    "geometry": mapping(geom_wgs),
                 }
-                for v in vias_lines
-            ],
-        }
+            )
 
         quarteiroes_fc = {
             "type": "FeatureCollection",
-            "features": [{"type": "Feature", "properties": {}, "geometry": mapping(_to_wgs(q))} for q in quarteiroes.geoms],
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "origem": "heuristica",
+                        "ia_metadata": {},
+                    },
+                    "geometry": mapping(_to_wgs(q)),
+                }
+                for q in quarteiroes.geoms
+            ],
         }
 
         calcadas_fc = {"type": "FeatureCollection", "features": []}
         if calcadas_union and not calcadas_union.is_empty:
-            geoms = [calcadas_union] if not hasattr(
-                calcadas_union, "geoms") else list(calcadas_union.geoms)
+            geoms = (
+                [calcadas_union]
+                if not hasattr(calcadas_union, "geoms")
+                else list(calcadas_union.geoms)
+            )
             calcadas_fc["features"] = [
-                {"type": "Feature", "properties": {"largura_m": calcada_w},
-                    "geometry": mapping(_to_wgs(g))}
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "largura_m": calcada_w,
+                        "origem": "heuristica",
+                        "ia_metadata": {},
+                    },
+                    "geometry": mapping(_to_wgs(g)),
+                }
                 for g in geoms
             ]
 
         vias_area_fc = {"type": "FeatureCollection", "features": []}
         if vias_pav_m and not vias_pav_m.is_empty:
-            vs = [vias_pav_m] if not hasattr(
-                vias_pav_m, "geoms") else list(vias_pav_m.geoms)
-            vias_area_fc["features"] = [{"type": "Feature", "properties": {
-            }, "geometry": mapping(_to_wgs(g))} for g in vs]
+            vs = [vias_pav_m] if not hasattr(vias_pav_m, "geoms") else list(
+                vias_pav_m.geoms
+            )
+            vias_area_fc["features"] = [
+                {
+                    "type": "Feature",
+                    "properties": {},
+                    "geometry": mapping(_to_wgs(g)),
+                }
+                for g in vs
+            ]
 
         return vias_fc, quarteiroes_fc, calcadas_fc, vias_area_fc
 
@@ -465,8 +544,9 @@ def build_road_and_blocks(
     # CASO 2: flags indicam ruas, mas geometrias não vieram
     # =========================
     if has_ruas_mask or has_ruas_eixo:
-        angle = float(
-            orient_opt) if orient_opt is not None else estimate_orientation_deg(al_m)
+        angle = float(orient_opt) if orient_opt is not None else estimate_orientation_deg(
+            al_m
+        )
         origin = (al_m.centroid.x, al_m.centroid.y)
         al_al = affinity.rotate(al_m, -angle, origin=origin, use_radians=False)
 
@@ -479,11 +559,15 @@ def build_road_and_blocks(
         trav_lines_al: List[LineString] = []
         for k in range(1, n + 1):
             xk = axmin + margin + k * comp_max
-            trav_lines_al.append(LineString(
-                [(xk, aymin - 2 * comp_max), (xk, aymax + 2 * comp_max)]))
+            trav_lines_al.append(
+                LineString([(xk, aymin - 2 * comp_max),
+                           (xk, aymax + 2 * comp_max)])
+            )
 
-        fam_horiz = [affinity.rotate(
-            l, angle, origin=origin, use_radians=False) for l in trav_lines_al]
+        fam_horiz = [
+            affinity.rotate(l, angle, origin=origin, use_radians=False)
+            for l in trav_lines_al
+        ]
         trav_corr = buffer_lines_as_corridors(fam_horiz, larg_h)
         trav_corr = [c.intersection(al_m) for c in trav_corr if not c.is_empty]
 
@@ -499,20 +583,26 @@ def build_road_and_blocks(
             if pav.is_empty:
                 return None, None, None
             expandidas = [
-                p.buffer(max(calcada_w, 0.0), cap_style=2, join_style=2) for p in base]
+                p.buffer(max(calcada_w, 0.0), cap_style=2, join_style=2) for p in base
+            ]
             total = unary_union(expandidas).intersection(al_m)
             calc = None
             if total and not total.is_empty:
                 diff = total.difference(pav)
                 if diff and not diff.is_empty:
-                    if isinstance(diff, (Polygon, MultiPolygon)) or getattr(diff, "geom_type", "").endswith("Polygon"):
+                    if isinstance(diff, (Polygon, MultiPolygon)) or getattr(
+                        diff, "geom_type", ""
+                    ).endswith("Polygon"):
                         calc = diff
-            return (pav if (pav and not pav.is_empty) else None,
-                    total if (total and not total.is_empty) else None,
-                    calc if (calc and not calc.is_empty) else None)
+            return (
+                pav if (pav and not pav.is_empty) else None,
+                total if (total and not total.is_empty) else None,
+                calc if (calc and not calc.is_empty) else None,
+            )
 
         vias_pav_m, vias_total_m, calcadas_union = _vias_pav_e_total(
-            pav_parts, al_m, calcada_w)
+            pav_parts, al_m, calcada_w
+        )
 
         if vias_total_m and not vias_total_m.is_empty:
             quarteiroes = _ensure_multipolygon(al_m.difference(vias_total_m))
@@ -524,46 +614,92 @@ def build_road_and_blocks(
             cl = l.intersection(al_m)
             if not cl.is_empty:
                 vias_lines.append(
-                    {"tipo": "horizontal", "largura_m": larg_h, "geom": cl})
+                    {
+                        "tipo": "horizontal",
+                        "largura_m": larg_h,
+                        "geom": cl,
+                        "orientacao_graus": (angle + 90.0) % 180.0,
+                    }
+                )
 
         vias_fc = {
+            "type": "FeatureCollection",
+            "features": [],
+        }
+        for idx, v in enumerate(vias_lines, start=1):
+            geom_wgs = _to_wgs(v["geom"])
+            props = {
+                "via_id": f"via_{idx}",
+                "tipo": v["tipo"],
+                "largura_m": v["largura_m"],
+                "categoria": "local",
+                "orientacao_graus": round(float(v["orientacao_graus"]) % 180.0, 2),
+                "origem": "heuristica",
+                "ia_metadata": {},
+            }
+            vias_fc["features"].append(
+                {
+                    "type": "Feature",
+                    "properties": props,
+                    "geometry": mapping(geom_wgs),
+                }
+            )
+
+        quarteiroes_fc = {
             "type": "FeatureCollection",
             "features": [
                 {
                     "type": "Feature",
-                    "properties": {"tipo": v["tipo"], "largura_m": v["largura_m"]},
-                    "geometry": mapping(_to_wgs(v["geom"])),
+                    "properties": {
+                        "origem": "heuristica",
+                        "ia_metadata": {},
+                    },
+                    "geometry": mapping(_to_wgs(q)),
                 }
-                for v in vias_lines
+                for q in quarteiroes.geoms
             ],
-        }
-        quarteiroes_fc = {
-            "type": "FeatureCollection",
-            "features": [{"type": "Feature", "properties": {}, "geometry": mapping(_to_wgs(q))} for q in quarteiroes.geoms],
         }
         calcadas_fc = {"type": "FeatureCollection", "features": []}
         if calcadas_union and not calcadas_union.is_empty:
-            geoms = [calcadas_union] if not hasattr(
-                calcadas_union, "geoms") else list(calcadas_union.geoms)
+            geoms = (
+                [calcadas_union]
+                if not hasattr(calcadas_union, "geoms")
+                else list(calcadas_union.geoms)
+            )
             calcadas_fc["features"] = [
-                {"type": "Feature", "properties": {"largura_m": calcada_w},
-                    "geometry": mapping(_to_wgs(g))}
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "largura_m": calcada_w,
+                        "origem": "heuristica",
+                        "ia_metadata": {},
+                    },
+                    "geometry": mapping(_to_wgs(g)),
+                }
                 for g in geoms
             ]
         vias_area_fc = {"type": "FeatureCollection", "features": []}
         if vias_pav_m and not vias_pav_m.is_empty:
-            vs = [vias_pav_m] if not hasattr(
-                vias_pav_m, "geoms") else list(vias_pav_m.geoms)
-            vias_area_fc["features"] = [{"type": "Feature", "properties": {
-            }, "geometry": mapping(_to_wgs(g))} for g in vs]
+            vs = [vias_pav_m] if not hasattr(vias_pav_m, "geoms") else list(
+                vias_pav_m.geoms
+            )
+            vias_area_fc["features"] = [
+                {
+                    "type": "Feature",
+                    "properties": {},
+                    "geometry": mapping(_to_wgs(g)),
+                }
+                for g in vs
+            ]
 
         return vias_fc, quarteiroes_fc, calcadas_fc, vias_area_fc
 
     # =========================
     # CASO 3: sem ruas → grelha gerada
     # =========================
-    angle = float(
-        orient_opt) if orient_opt is not None else estimate_orientation_deg(al_m)
+    angle = float(orient_opt) if orient_opt is not None else estimate_orientation_deg(
+        al_m
+    )
     spacing_vias = 2 * prof_min + larg_v + 2 * calcada_w
     cx = (al_m.bounds[0] + al_m.bounds[2]) / 2.0
     cy = (al_m.bounds[1] + al_m.bounds[3]) / 2.0
@@ -575,7 +711,8 @@ def build_road_and_blocks(
     vias_vert_corr = [p for p in vias_vert_corr if not p.is_empty]
 
     fam_horiz = _gen_parallel_lines_covering_bbox(
-        al_m.bounds, comp_max, angle + 90.0, (cx, cy))
+        al_m.bounds, comp_max, angle + 90.0, (cx, cy)
+    )
     trav_corr = buffer_lines_as_corridors(fam_horiz, larg_h)
     trav_corr = [poly.intersection(al_m) for poly in trav_corr]
     trav_corr = [p for p in trav_corr if not p.is_empty]
@@ -590,17 +727,22 @@ def build_road_and_blocks(
         if pav.is_empty:
             return None, None, None
         expandidas = [
-            p.buffer(max(calcada_w, 0.0), cap_style=2, join_style=2) for p in base]
+            p.buffer(max(calcada_w, 0.0), cap_style=2, join_style=2) for p in base
+        ]
         total = unary_union(expandidas).intersection(al_m)
         calc = None
         if total and not total.is_empty:
             diff = total.difference(pav)
             if diff and not diff.is_empty:
-                if isinstance(diff, (Polygon, MultiPolygon)) or getattr(diff, "geom_type", "").endswith("Polygon"):
+                if isinstance(diff, (Polygon, MultiPolygon)) or getattr(
+                    diff, "geom_type", ""
+                ).endswith("Polygon"):
                     calc = diff
-        return (pav if (pav and not pav.is_empty) else None,
-                total if (total and not total.is_empty) else None,
-                calc if (calc and not calc.is_empty) else None)
+        return (
+            pav if (pav and not pav.is_empty) else None,
+            total if (total and not total.is_empty) else None,
+            calc if (calc and not calc.is_empty) else None,
+        )
 
     pav_parts = []
     pav_parts += [p for p in vias_vert_corr if p and not p.is_empty]
@@ -615,45 +757,101 @@ def build_road_and_blocks(
         quarteiroes = _ensure_multipolygon(al_m)
 
     vias_lines = []
-    for l in _gen_parallel_lines_covering_bbox(al_m.bounds, spacing_vias, angle, (cx, cy)) + \
-            _gen_parallel_lines_covering_bbox(al_m.bounds, comp_max, angle + 90.0, (cx, cy)):
+    # verticais (aprox. alinhadas com angle)
+    for l in _gen_parallel_lines_covering_bbox(al_m.bounds, spacing_vias, angle, (cx, cy)):
         cl = l.intersection(al_m)
         if not cl.is_empty:
-            tipo = "vertical" if _angle_diff(
-                estimate_orientation_deg(cl), angle) < 10.0 else "horizontal"
-            vias_lines.append({"tipo": tipo, "largura_m": (
-                larg_v if tipo == "vertical" else larg_h), "geom": cl})
+            vias_lines.append(
+                {
+                    "tipo": "vertical",
+                    "largura_m": larg_v,
+                    "geom": cl,
+                    "orientacao_graus": angle % 180.0,
+                }
+            )
+    # horizontais (aprox. alinhadas com angle+90)
+    for l in _gen_parallel_lines_covering_bbox(
+        al_m.bounds, comp_max, angle + 90.0, (cx, cy)
+    ):
+        cl = l.intersection(al_m)
+        if not cl.is_empty:
+            vias_lines.append(
+                {
+                    "tipo": "horizontal",
+                    "largura_m": larg_h,
+                    "geom": cl,
+                    "orientacao_graus": (angle + 90.0) % 180.0,
+                }
+            )
 
     vias_fc = {
+        "type": "FeatureCollection",
+        "features": [],
+    }
+    for idx, v in enumerate(vias_lines, start=1):
+        geom_wgs = _to_wgs(v["geom"])
+        props = {
+            "via_id": f"via_{idx}",
+            "tipo": v["tipo"],
+            "largura_m": v["largura_m"],
+            "categoria": "local",
+            "orientacao_graus": round(float(v["orientacao_graus"]) % 180.0, 2),
+            "origem": "heuristica",
+            "ia_metadata": {},
+        }
+        vias_fc["features"].append(
+            {
+                "type": "Feature",
+                "properties": props,
+                "geometry": mapping(geom_wgs),
+            }
+        )
+
+    quarteiroes_fc = {
         "type": "FeatureCollection",
         "features": [
             {
                 "type": "Feature",
-                "properties": {"tipo": v["tipo"], "largura_m": v["largura_m"]},
-                "geometry": mapping(_to_wgs(v["geom"])),
+                "properties": {
+                    "origem": "heuristica",
+                    "ia_metadata": {},
+                },
+                "geometry": mapping(_to_wgs(q)),
             }
-            for v in vias_lines
+            for q in quarteiroes.geoms
         ],
-    }
-    quarteiroes_fc = {
-        "type": "FeatureCollection",
-        "features": [{"type": "Feature", "properties": {}, "geometry": mapping(_to_wgs(q))} for q in quarteiroes.geoms],
     }
     calcadas_fc = {"type": "FeatureCollection", "features": []}
     if calcadas_union and not calcadas_union.is_empty:
-        geoms = [calcadas_union] if not hasattr(
-            calcadas_union, "geoms") else list(calcadas_union.geoms)
+        geoms = (
+            [calcadas_union]
+            if not hasattr(calcadas_union, "geoms")
+            else list(calcadas_union.geoms)
+        )
         calcadas_fc["features"] = [
-            {"type": "Feature", "properties": {"largura_m": calcada_w},
-                "geometry": mapping(_to_wgs(g))}
+            {
+                "type": "Feature",
+                "properties": {
+                    "largura_m": calcada_w,
+                    "origem": "heuristica",
+                    "ia_metadata": {},
+                },
+                "geometry": mapping(_to_wgs(g)),
+            }
             for g in geoms
         ]
     vias_area_fc = {"type": "FeatureCollection", "features": []}
     if vias_pav_m and not vias_pav_m.is_empty:
         vs = [vias_pav_m] if not hasattr(
             vias_pav_m, "geoms") else list(vias_pav_m.geoms)
-        vias_area_fc["features"] = [{"type": "Feature", "properties": {
-        }, "geometry": mapping(_to_wgs(g))} for g in vs]
+        vias_area_fc["features"] = [
+            {
+                "type": "Feature",
+                "properties": {},
+                "geometry": mapping(_to_wgs(g)),
+            }
+            for g in vs
+        ]
 
     return vias_fc, quarteiroes_fc, calcadas_fc, vias_area_fc
 
@@ -661,6 +859,7 @@ def build_road_and_blocks(
 # ------------------------------------------------------------------------------
 # Lotes (fatias)
 # ------------------------------------------------------------------------------
+
 
 def _rotate_align(g, angle_deg: float, origin):
     return affinity.rotate(g, -angle_deg, origin=origin, use_radians=False)
@@ -724,9 +923,11 @@ def slice_lots(quarteiroes_fc: dict, params: dict, srid_calc: int = 3857) -> dic
         corner_al_pt = Point(cx_al, cy_al)
 
         center_m_unrot = affinity.rotate(
-            center_m_al, angle, origin=origin, use_radians=False)
+            center_m_al, angle, origin=origin, use_radians=False
+        )
         corner_m_unrot = affinity.rotate(
-            corner_al_pt, angle, origin=origin, use_radians=False)
+            corner_al_pt, angle, origin=origin, use_radians=False
+        )
 
         geom_wgs = shapely_transform(p_m, tf_m_to_wgs)
         center_wgs = shapely_transform(center_m_unrot, tf_m_to_wgs)
@@ -736,13 +937,24 @@ def slice_lots(quarteiroes_fc: dict, params: dict, srid_calc: int = 3857) -> dic
             {
                 "type": "Feature",
                 "properties": {
-                    "lot_number": lot_counter,
-                    "frente_aprox_m": round(float(frente_aprox), 2),
-                    "prof_aprox_m": round(float(prof_aprox), 2),
+                    # número do lote dentro da versão (casa com Lote.numero)
+                    "numero": lot_counter,
+                    "frente_m": round(float(frente_aprox), 2),
+                    "prof_media_m": round(float(prof_aprox), 2),
                     "area_m2": round(area_m2, 2),
+                    "lot_number": lot_counter,
+                    # orientação do lote (0..180)
+                    "orientacao_graus": round(float(angle) % 180.0, 2),
+                    # snapshot de regras
+                    "frente_min_m": frente_min,
+                    "prof_min_m": prof_min,
+                    # dados auxiliares para label no front
                     "label_center": [center_wgs.x, center_wgs.y],
                     "label_corner": [corner_wgs.x, corner_wgs.y],
                     "score_qualidade": 1.0,
+                    # flags para IA/backend
+                    "origem": "heuristica",
+                    "ia_metadata": {},
                 },
                 "geometry": mapping(geom_wgs),
             }
@@ -824,8 +1036,11 @@ def slice_lots(quarteiroes_fc: dict, params: dict, srid_calc: int = 3857) -> dic
             cuts = []
             for k in range(1, n):
                 xk = fminx + offset + k * frente_min
-                cuts.append(LineString(
-                    [(xk, fminy - 10 * prof_min), (xk, fmaxy + 10 * prof_min)]))
+                cuts.append(
+                    LineString(
+                        [(xk, fminy - 10 * prof_min), (xk, fmaxy + 10 * prof_min)]
+                    )
+                )
 
             pedacos_al = _split_once(faixa_al, cuts)
             pedacos_al = [p.buffer(0) for p in pedacos_al if not p.is_empty]
@@ -853,13 +1068,19 @@ def slice_lots(quarteiroes_fc: dict, params: dict, srid_calc: int = 3857) -> dic
                     continue
 
                 # lote muito grande e frente comporta divisão ao meio
-                if area_m2_aligned > area_double_limit and frente_aprox >= 2.0 * frente_req:
+                if (
+                    area_m2_aligned > area_double_limit
+                    and frente_aprox >= 2.0 * frente_req
+                ):
                     xmid = (pxmin + pxmax) / 2.0
                     cut = LineString(
-                        [(xmid, pymin - 10 * prof_min), (xmid, pymax + 10 * prof_min)])
+                        [(xmid, pymin - 10 * prof_min),
+                         (xmid, pymax + 10 * prof_min)]
+                    )
                     subparts = _split_once(p_al, [cut])
-                    subparts = [pp.buffer(0)
-                                for pp in subparts if not pp.is_empty]
+                    subparts = [
+                        pp.buffer(0) for pp in subparts if not pp.is_empty
+                    ]
                     if len(subparts) == 2:
                         sp1, sp2 = subparts
                         if _piece_is_valid(sp1) and _piece_is_valid(sp2):
@@ -876,15 +1097,17 @@ def slice_lots(quarteiroes_fc: dict, params: dict, srid_calc: int = 3857) -> dic
 # Preview (retorna tudo que o front precisa)
 # ------------------------------------------------------------------------------
 
+
 def compute_preview(al_geojson: dict, params: dict) -> Dict:
     """
     Retorna dicionário com:
-      - vias (LINHAS)
+      - vias (LINHAS, com via_id, tipo, largura_m, categoria, orientacao_graus)
       - vias_area (POLÍGONOS cinza SEM calçada)
       - quarteiroes (POLÍGONOS)
-      - lotes (POLÍGONOS, com labels e métricas)
+      - lotes (POLÍGONOS, com numero e métricas)
       - calcadas (POLÍGONOS, faixa exclusiva)
-      - metrics
+      - areas_publicas (POLÍGONOS, por enquanto vazio no heurístico)
+      - metrics (contagens + métricas gerais para IA)
     """
     vias_fc, quarteiroes_fc, calcadas_fc, vias_area_fc = build_road_and_blocks(
         al_geojson, params, params.get("srid_calc", 3857)
@@ -892,19 +1115,112 @@ def compute_preview(al_geojson: dict, params: dict) -> Dict:
     lotes_fc = slice_lots(quarteiroes_fc, params,
                           params.get("srid_calc", 3857))
 
+    # métricas adicionais úteis para IA
+    n_lotes = len(lotes_fc["features"])
+    area_total_lotes = 0.0
+    if n_lotes:
+        for f in lotes_fc["features"]:
+            props = f.get("properties") or {}
+            try:
+                area_total_lotes += float(props.get("area_m2") or 0.0)
+            except Exception:
+                pass
+
     metrics = {
         "n_vias": len(vias_fc["features"]),
         "n_quarteiroes": len(quarteiroes_fc["features"]),
-        "n_lotes": len(lotes_fc["features"]),
+        "n_lotes": n_lotes,
         "n_calcadas": len(calcadas_fc["features"]),
         "n_vias_area": len(vias_area_fc["features"]),
+        "area_total_lotes_m2": round(area_total_lotes, 2),
+        "area_media_lote_m2": round(area_total_lotes / n_lotes, 2) if n_lotes else 0.0,
+        "has_areas_publicas": False,
     }
 
     return {
-        "vias": vias_fc,            # LINHAS (eixos) → Branco no front
+        # LINHAS (eixos) → Branco no front, editáveis por via_id
+        "vias": vias_fc,
         "vias_area": vias_area_fc,  # POLÍGONOS cinza já sem a faixa de calçada
         "quarteiroes": quarteiroes_fc,
+        # cada lote com numero, frente_m, prof_media_m, area_m2, orientacao_graus
         "lotes": lotes_fc,
         "calcadas": calcadas_fc,    # POLÍGONOS (faixa branca), exclusivos
+        "areas_publicas": {         # por enquanto vazio no heurístico
+            "type": "FeatureCollection",
+            "features": [],
+        },
         "metrics": metrics,
     }
+
+
+# parcelamento/services.py (trecho)
+
+
+def compute_preview_com_comandos(al_geom, params, comandos):
+    """
+    Versão de compute_preview que aplica comandos PRE (ex.: criar_praca)
+    na área loteável antes de chamar o algoritmo normal.
+
+    al_geom: GeoJSON Geometry ou Feature (como já vem hoje do front)
+    params: dict de parâmetros numéricos JÁ no formato esperado pelo backend
+    comandos: lista de comandos vindos da IA (campo "comandos")
+    """
+
+    # Se não há comandos, cai direto no fluxo antigo
+    if not comandos:
+        return compute_preview(al_geom, params)
+
+    # Normaliza: se veio Feature, pega só a geometry
+    geom_obj = al_geom
+    if isinstance(geom_obj, dict) and geom_obj.get("type") == "Feature":
+        geom_obj = geom_obj.get("geometry")
+
+    # Tenta converter para GEOSGeometry
+    try:
+        al_geos = GEOSGeometry(json.dumps(geom_obj), srid=4326)
+    except Exception:
+        # Se algo der errado, não quebra: usa o fluxo antigo
+        return compute_preview(al_geom, params)
+
+    # Executa comandos PRE (por enquanto: criar praça centralizada)
+    al_modificada, areas_publicas_novas = executar_comandos_pre(
+        al_geos,
+        comandos,
+    )
+
+    # Converte a nova área loteável para GeoJSON geometry
+    al_mod_geojson = json.loads(al_modificada.geojson)
+
+    # Chama o algoritmo normal de parcelamento usando a área já modificada
+    preview = compute_preview(al_mod_geojson, params)
+
+    # Garante que exista um FeatureCollection de áreas públicas
+    ap_fc = preview.get("areas_publicas")
+    if not isinstance(ap_fc, dict) or ap_fc.get("type") != "FeatureCollection":
+        ap_fc = {"type": "FeatureCollection", "features": []}
+
+    features = ap_fc["features"]
+
+    # Anexa as novas áreas públicas (praças) criadas pelos comandos
+    for ap in areas_publicas_novas:
+        geom = ap["geometry"]
+        tipo = ap.get("tipo", "praca")
+
+        props = {
+            "tipo": tipo,
+            "nome": ap.get("nome", ""),
+            "descricao": ap.get("descricao", "Criada pela IA"),
+            "origem": ap.get("origem", "ia"),
+        }
+
+        features.append(
+            {
+                "type": "Feature",
+                "properties": props,
+                "geometry": json.loads(geom.geojson),
+            }
+        )
+
+    preview["areas_publicas"] = ap_fc
+
+    return preview

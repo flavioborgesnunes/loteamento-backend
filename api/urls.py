@@ -1,6 +1,8 @@
 from django.urls import include, path
 from geodata import views as geodata_views
 from ia import views as ia_views
+from iaparcelamento import views as ia_parcelamento_views
+from parcelamento.views import PlanoViewSet, VersaoViewSet
 # Projetos (funções avulsas)
 from projetos.views import (exportar_projeto, list_projects,
                             project_features_geojson, project_map_summary,
@@ -13,20 +15,34 @@ from restricoes import views as restricoes_views
 from rios import views as rios_views
 # Apps existentes
 from userauth import views as userauths_views
-from parcelamento.views import PlanoViewSet, VersaoViewSet
-from iaparcelamento import views as ia_parcelamento_views
+
+# Parcelamento: mapeia métodos HTTP → ações do ViewSet
+plano_list = PlanoViewSet.as_view({"get": "list", "post": "create"})
+plano_detail = PlanoViewSet.as_view(
+    {"get": "retrieve", "patch": "partial_update", "put": "update", "delete": "destroy"})
+plano_preview = PlanoViewSet.as_view({"post": "preview"})
+plano_material = PlanoViewSet.as_view({"post": "materializar"})
+plano_recalcular = PlanoViewSet.as_view({"post": "recalcular"})  # NOVO
+
+versao_list = VersaoViewSet.as_view({"get": "list"})
+versao_detail = VersaoViewSet.as_view({"get": "retrieve"})
+versao_geojson = VersaoViewSet.as_view({"get": "geojson"})
+versao_kml = VersaoViewSet.as_view({"post": "kml"})
+versao_geojson_bord = VersaoViewSet.as_view(
+    {"get": "geojson_com_bordas"})  # NOVO
 
 
 # Parcelamento: mapeia métodos HTTP → ações do ViewSet
-plano_list     = PlanoViewSet.as_view({"get": "list", "post": "create"})
-plano_detail   = PlanoViewSet.as_view({"get": "retrieve", "patch": "partial_update", "put": "update", "delete": "destroy"})
-plano_preview  = PlanoViewSet.as_view({"post": "preview"})
+plano_list = PlanoViewSet.as_view({"get": "list", "post": "create"})
+plano_detail = PlanoViewSet.as_view(
+    {"get": "retrieve", "patch": "partial_update", "put": "update", "delete": "destroy"})
+plano_preview = PlanoViewSet.as_view({"post": "preview"})
 plano_material = PlanoViewSet.as_view({"post": "materializar"})
 
-versao_list    = VersaoViewSet.as_view({"get": "list"})
-versao_detail  = VersaoViewSet.as_view({"get": "retrieve"})
+versao_list = VersaoViewSet.as_view({"get": "list"})
+versao_detail = VersaoViewSet.as_view({"get": "retrieve"})
 versao_geojson = VersaoViewSet.as_view({"get": "geojson"})
-versao_kml     = VersaoViewSet.as_view({"post": "kml"})
+versao_kml = VersaoViewSet.as_view({"post": "kml"})
 
 # ------------------------------------------------------------------------------
 # URL patterns
@@ -60,26 +76,40 @@ urlpatterns = [
     path("projetos/<int:pk>/overlay/", project_overlay_patch),
     path("projetos/<int:pk>/overlay/delete/", project_overlay_delete),
     path("projetos/exportar/", exportar_projeto),
-    
+
     # Restrições
-    path("projetos/<int:project_id>/restricoes/", restricoes_views.RestricoesCreateAPIView.as_view()),
-    path("projetos/<int:project_id>/restricoes/list/", restricoes_views.RestricoesListByProjectAPIView.as_view()),
-    path("restricoes/<int:restricoes_id>/geo/", restricoes_views.RestricoesGeoDetailAPIView.as_view()),
-    
+    path("projetos/<int:project_id>/restricoes/",
+         restricoes_views.RestricoesCreateAPIView.as_view()),
+    path("projetos/<int:project_id>/restricoes/list/",
+         restricoes_views.RestricoesListByProjectAPIView.as_view()),
+    path("restricoes/<int:restricoes_id>/geo/",
+         restricoes_views.RestricoesGeoDetailAPIView.as_view()),
+
     # Parcelamento:
     # Planos
     path("parcelamento/planos/", plano_list, name="parcelamento-planos-list"),
-    path("parcelamento/planos/<int:pk>/", plano_detail, name="parcelamento-planos-detail"),
-    path("parcelamento/planos/<int:pk>/preview/", plano_preview, name="parcelamento-planos-preview"),
-    path("parcelamento/planos/<int:pk>/materializar/", plano_material, name="parcelamento-planos-materializar"),
+    path("parcelamento/planos/<int:pk>/", plano_detail,
+         name="parcelamento-planos-detail"),
+    path("parcelamento/planos/<int:pk>/preview/",
+         plano_preview, name="parcelamento-planos-preview"),
+    path("parcelamento/planos/<int:pk>/materializar/",
+         plano_material, name="parcelamento-planos-materializar"),
+    path("parcelamento/planos/<int:pk>/recalcular/", plano_recalcular,
+         name="parcelamento-planos-recalcular"),
 
     # Versões
-    path("parcelamento/versoes/", versao_list, name="parcelamento-versoes-list"),
-    path("parcelamento/versoes/<int:pk>/", versao_detail, name="parcelamento-versoes-detail"),
-    path("parcelamento/versoes/<int:pk>/geojson/", versao_geojson, name="parcelamento-versoes-geojson"),
-    path("parcelamento/versoes/<int:pk>/kml/", versao_kml, name="parcelamento-versoes-kml"),
-    
-        # IA Parcelamento
+    path("parcelamento/versoes/", versao_list,
+         name="parcelamento-versoes-list"),
+    path("parcelamento/versoes/<int:pk>/", versao_detail,
+         name="parcelamento-versoes-detail"),
+    path("parcelamento/versoes/<int:pk>/geojson/",
+         versao_geojson, name="parcelamento-versoes-geojson"),
+    path("parcelamento/versoes/<int:pk>/geojson-bordas/", versao_geojson_bord,
+         name="parcelamento-versoes-geojson-bordas"),
+    path("parcelamento/versoes/<int:pk>/kml/",
+         versao_kml, name="parcelamento-versoes-kml"),
+
+    # IA Parcelamento
     path(
         "ia-parcelamento/planos/<int:plano_id>/sugerir-parametros/",
         ia_parcelamento_views.SugerirParametrosView.as_view(),
@@ -96,5 +126,5 @@ urlpatterns = [
         name="ia-parcelamento-svg-preview",
     ),
 
-    
+
 ]

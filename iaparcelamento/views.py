@@ -6,18 +6,196 @@ from typing import Any, Dict
 
 from django.conf import settings
 from django.shortcuts import get_object_or_404
+from openai import OpenAI
+from parcelamento.models import ParcelamentoPlano
+from parcelamento.services import compute_preview, compute_preview_com_comandos
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from shapely.geometry import shape
 
-from parcelamento.models import ParcelamentoPlano
-from parcelamento.services import compute_preview
-from .rag import load_rag_context
 from .openai_client import get_default_model_name
-from openai import OpenAI
+from .rag import load_rag_context
+from .serializers import (PreviewIaRequestSerializer,
+                          PreviewIaResponseSerializer,
+                          SugerirParametrosRequestSerializer,
+                          SugerirParametrosResponseSerializer)
 
 logger = logging.getLogger(__name__)
+
+IA_PARCELAMENTO_SYSTEM_PROMPT = """
+Você é um assistente de planejamento de parcelamento urbano.
+
+SEMPRE produza uma resposta em JSON ESTRITO, sem comentários, sem texto antes ou depois, exatamente neste formato:
+
+{
+  "versao_esquema": "1.0",
+  "parametros": { ... },
+  "comandos": [ ... ],
+  "observacoes_urbanisticas": "..."
+}
+
+NUNCA inclua explicações em linguagem natural fora do JSON.
+NUNCA inclua campos além dos especificados abaixo, exceto dentro de "parametros", onde você pode adicionar novos campos numéricos se forem úteis.
+
+------------------------------
+CONTRATO DO CAMPO "parametros"
+------------------------------
+
+O campo "parametros" deve conter os parâmetros numéricos que o backend usará para gerar o parcelamento automático. Use SEMPRE um objeto JSON com chaves em snake_case. Exemplos de campos:
+
+{
+  "frente_min_m": number,
+  "prof_min_m": number,
+  "largura_ruas_verticais_m": number,
+  "largura_ruas_horizontais_m": number,
+  "comprimento_max_quarteirao_m": number,
+  "largura_calcada_m": number,
+  "orientacao_graus": number | null
+}
+
+Regras:
+- Use valores em METROS.
+- Se o usuário falar "lotes 10x25", isso significa frente_min_m = 10, prof_min_m = 25.
+- Se o usuário falar "ruas de 12 metros", isso vale para ruas verticais e horizontais, a não ser que ele diferencie.
+- Se não houver orientação específica, use "orientacao_graus": null.
+
+Você pode adicionar outros parâmetros numéricos se forem coerentes, mas mantenha SEMPRE esse objeto como um simples JSON com chaves numéricas.
+
+-----------------------------
+CONTRATO DO CAMPO "comandos"
+-----------------------------
+
+O campo "comandos" é SEMPRE uma lista (array) de comandos geométricos.
+
+Cada comando é um objeto com o formato:
+
+{
+  "id": "string",
+  "acao": "string",
+  "momento": "string",
+  "localizacao": {
+    "estrategia": "string",
+    "params": { ... }   // opcional
+  },
+  "tamanho": {
+    "tipo": "string",
+    "valor": number
+  },
+  "forma": {
+    "tipo": "string"
+  },
+  "restricoes": {
+    // opcional, pode estar vazio
+  },
+  "descricao": "string opcional"
+}
+
+Campos obrigatórios por enquanto:
+- "id": um identificador de comando, por exemplo "cmd_praca_central_1".
+- "acao": para a primeira versão, use "criar_praca" quando o usuário pedir uma praça.
+- "momento": "pre" ou "pos".
+  - Use "pre" quando a ação deve acontecer ANTES do parcelamento (ex.: abrir um buraco na área loteável para uma praça central).
+  - Use "pos" quando a ação deve acontecer DEPOIS (ex.: transformar lotes existentes em praça).
+- "localizacao": SEMPRE um objeto com:
+  - "estrategia": string que define a lógica de localização.
+  - "params": objeto opcional com parâmetros extras.
+
+Para a PRIMEIRA VERSÃO (v1), implemente APENAS este comando:
+
+1) Criar praça centralizada:
+- Use:
+  - "acao": "criar_praca"
+  - "momento": "pre"
+  - "localizacao.estrategia": "centro_da_area_loteavel"
+- Exemplo de comando completo:
+
+{
+  "id": "cmd_praca_central",
+  "acao": "criar_praca",
+  "momento": "pre",
+  "localizacao": {
+    "estrategia": "centro_da_area_loteavel"
+  },
+  "tamanho": {
+    "tipo": "raio_relativo",
+    "valor": 0.15
+  },
+  "forma": {
+    "tipo": "circulo"
+  },
+  "restricoes": {
+    "max_fracao_area_loteavel": 0.2
+  },
+  "descricao": "Criar uma praça circular pequena no centro da área loteável."
+}
+
+Regras para "tamanho":
+- "tamanho" é um objeto com:
+  - "tipo": um dos:
+    - "raio_relativo"  (fração do raio base da área)
+    - "raio_absoluto_m" (raio em metros)
+    - "area_alvo_m2"    (área alvo em m²)
+  - "valor": número
+- Para a praça centralizada, prefira:
+  - "tipo": "raio_relativo"
+  - "valor": um número entre 0.05 e 0.3, dependendo do pedido do usuário (pequena, média, grande).
+
+Regras para "forma":
+- "forma" deve ter pelo menos:
+  {
+    "tipo": "circulo"
+  }
+- Se o usuário não especificar, use sempre "circulo".
+
+Regras para "restricoes":
+- Pode estar vazio ou ausente.
+- Quando fizer sentido, use:
+  {
+    "max_fracao_area_loteavel": number
+  }
+
+Você pode adicionar outros comandos no futuro (como "unir_lotes"), mas por enquanto PRIORIZE:
+- "acao": "criar_praca"
+- "localizacao.estrategia": "centro_da_area_loteavel" quando o usuário pedir uma praça "central", "no meio", "praça centralizada" etc.
+
+Se o usuário NÃO pedir praça nem área pública, você pode retornar "comandos": [] (lista vazia).
+
+
+---------------------------------------
+CONTRATO DO CAMPO "observacoes_urbanisticas"
+---------------------------------------
+
+- "observacoes_urbanisticas" é SEMPRE uma string.
+- Use linguagem natural, explicando de forma clara as decisões tomadas:
+  - porque escolheu frente/profundidade,
+  - porque escolheu larguras de vias,
+  - como a praça foi planejada (quando existir),
+  - outras recomendações urbanísticas.
+- Não coloque JSON aqui, é texto livre.
+
+-------------------------
+FORMATO FINAL OBRIGATÓRIO
+-------------------------
+
+Resuma tudo isso gerando SEMPRE um JSON VÁLIDO com esta estrutura:
+
+{
+  "versao_esquema": "1.0",
+  "parametros": {
+    ...parametros numericos...
+  },
+  "comandos": [
+    ...lista de comandos geométricos conforme especificado...
+  ],
+  "observacoes_urbanisticas": "texto explicando as decisões urbanísticas"
+}
+
+NÃO use comentários.
+NÃO use vírgula sobrando no final.
+NÃO escreva nada fora do JSON.
+"""
+
 
 # ---------------------------------------------------------------------------
 # OpenAI client
@@ -45,9 +223,8 @@ def _merge_plan_params(plano: ParcelamentoPlano, params_iniciais: Dict[str, Any]
             params_iniciais.get("larg_rua_horiz_m", plano.larg_rua_horiz_m)
         ),
         "compr_max_quarteirao_m": float(
-            params_iniciais.get(
-                "compr_max_quarteirao_m", plano.compr_max_quarteirao_m
-            )
+            params_iniciais.get("compr_max_quarteirao_m",
+                                plano.compr_max_quarteirao_m)
         ),
         "orientacao_graus": params_iniciais.get(
             "orientacao_graus",
@@ -65,11 +242,67 @@ def _merge_plan_params(plano: ParcelamentoPlano, params_iniciais: Dict[str, Any]
         if params_iniciais.get("dist_min_rua_quarteirao_m") is not None
         else None,
         "tolerancia_frac": float(params_iniciais.get("tolerancia_frac", 0.05)),
-        "calcada_largura_m": float(
-            params_iniciais.get("calcada_largura_m", 2.5)
-        ),
+        "calcada_largura_m": float(params_iniciais.get("calcada_largura_m", 2.5)),
     }
     return base
+
+
+def _normalize_parametros_ia(parametros: Dict[str, Any], base_params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Converte os nomes de campos vindos da IA (parametros) para
+    os nomes esperados pelo backend (compute_preview), usando base_params
+    como default.
+
+    - parametros: dict vindo da IA ("parametros")
+    - base_params: dict já montado pelo _merge_plan_params (com defaults do plano)
+
+    Retorna um dict pronto para passar ao compute_preview / compute_preview_com_comandos.
+    """
+    # Começa dos params base (já com defaults do plano)
+    params = base_params.copy()
+
+    p = parametros or {}
+
+    # 1) Sobrescrever diretamente campos que já estão no padrão do backend
+    for key in [
+        "frente_min_m",
+        "prof_min_m",
+        "larg_rua_vert_m",
+        "larg_rua_horiz_m",
+        "compr_max_quarteirao_m",
+        "srid_calc",
+        "orientacao_graus",
+        "has_ruas_mask_fc",
+        "has_ruas_eixo_fc",
+        "ruas_mask_fc",
+        "ruas_eixo_fc",
+        "guia_linha_fc",
+        "dist_min_rua_quarteirao_m",
+        "tolerancia_frac",
+        "calcada_largura_m",
+    ]:
+        if key in p and p[key] is not None:
+            params[key] = p[key]
+
+    # 2) Sinônimos usados no prompt da IA → nomes do backend
+
+    # largura_ruas_verticais_m → larg_rua_vert_m
+    if "largura_ruas_verticais_m" in p and "larg_rua_vert_m" not in p:
+        params["larg_rua_vert_m"] = p["largura_ruas_verticais_m"]
+
+    # largura_ruas_horizontais_m → larg_rua_horiz_m
+    if "largura_ruas_horizontais_m" in p and "larg_rua_horiz_m" not in p:
+        params["larg_rua_horiz_m"] = p["largura_ruas_horizontais_m"]
+
+    # comprimento_max_quarteirao_m → compr_max_quarteirao_m
+    if "comprimento_max_quarteirao_m" in p and "compr_max_quarteirao_m" not in p:
+        params["compr_max_quarteirao_m"] = p["comprimento_max_quarteirao_m"]
+
+    # largura_calcada_m → calcada_largura_m
+    if "largura_calcada_m" in p and "calcada_largura_m" not in p:
+        params["calcada_largura_m"] = p["largura_calcada_m"]
+
+    return params
 
 
 def _summarize_al(al_geom: dict | None) -> Dict[str, Any]:
@@ -105,54 +338,28 @@ def _call_openai_sugerir(
     preferencias_usuario: str = "",
 ) -> dict:
     """
-    Chama a IA para sugerir parâmetros de parcelamento.
+    Chama a IA para sugerir parâmetros de parcelamento E comandos geométricos.
 
     Espera resposta em JSON no formato:
 
     {
-      "params_sugeridos": {...},
-      "observacoes": "texto",
-      "elementos_especiais": [...]
+      "versao_esquema": "1.0",
+      "parametros": { ... },
+      "comandos": [ ... ],
+      "observacoes_urbanisticas": "..."
     }
     """
 
-    model = getattr(settings, "OPENAI_PARCELAMENTO_MODEL", None) or get_default_model_name()
+    model = getattr(settings, "OPENAI_PARCELAMENTO_MODEL",
+                    None) or get_default_model_name()
 
     al_resumo = _summarize_al(al_geom)
     rag_ctx = load_rag_context()  # texto com normas/boas práticas
 
-    prompt_text = f"""
-Você é uma IA urbanista especializada em parcelamento do solo (Brasil).
-
-Você deve SUGERIR parâmetros numéricos para o cálculo automático de:
-- malha viária (ruas verticais / horizontais),
-- quarteirões,
-- lotes (frente e profundidade mínimas),
-- largura de calçadas,
-
-sempre respeitando o mínimo de DOIS LOTES (profundidade+profundidade) entre vias paralelas,
-e buscando frentes próximas de 10m e áreas próximas de 250m², a não ser que as restrições impeçam.
-
-Responda **APENAS** com um JSON válido UTF-8, SEM texto extra fora do JSON, no formato:
-
-{{
-  "params_sugeridos": {{
-    "frente_min_m": float,
-    "prof_min_m": float,
-    "larg_rua_vert_m": float,
-    "larg_rua_horiz_m": float,
-    "compr_max_quarteirao_m": float,
-    "orientacao_graus": float ou null,
-    "srid_calc": 3857,
-    "has_ruas_mask_fc": bool,
-    "has_ruas_eixo_fc": bool,
-    "calcada_largura_m": float
-  }},
-  "observacoes": "string explicando as escolhas em linguagem simples",
-  "elementos_especiais": [
-    "descrições de elementos especiais sugeridos, como praça circular, rotatória, acessos, etc."
-  ]
-}}
+    # Prompt do usuário: contexto específico desse plano / chamada
+    user_prompt = f"""
+Contexto: você vai sugerir parâmetros de parcelamento urbano e, opcionalmente,
+comandos geométricos (como criar praça) para um plano de loteamento.
 
 -------------------------------
 CONHECIMENTO BASE (RAG):
@@ -168,18 +375,28 @@ PARÂMETROS BASE (defaults calculados no backend):
 
 -------------------------------
 RESTRIÇÕES E CONTEXTO (rios, áreas verdes, LT, etc.):
-{json.dumps(restricoes_resumo or {{}}, ensure_ascii=False, indent=2)}
+{json.dumps(restricoes_resumo or {}, ensure_ascii=False, indent=2)}
 
 -------------------------------
-PREFERÊNCIAS DO USUÁRIO:
+PREFERÊNCIAS DO USUÁRIO (texto livre):
 \"\"\"{preferencias_usuario or ""}\"\"\"
+
+Com base nessas informações, preencha os campos "parametros", "comandos"
+e "observacoes_urbanisticas" seguindo EXATAMENTE o contrato descrito
+na mensagem de sistema. Responda apenas com o JSON final.
 """
 
-    logger.info("[IA] Chamando modelo %s para sugerir parâmetros de parcelamento", model)
+    logger.info(
+        "[IA] Chamando modelo %s para sugerir parâmetros+comandos de parcelamento", model
+    )
 
+    # Usando o novo contrato via system + user
     resp = client.responses.create(
         model=model,
-        input=prompt_text,
+        input=[
+            {"role": "system", "content": IA_PARCELAMENTO_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
         max_output_tokens=800,
     )
 
@@ -201,10 +418,12 @@ PREFERÊNCIAS DO USUÁRIO:
             text = ""
 
     text = (text or "").strip()
-    logger.info("[IA] Texto bruto da resposta (primeiros 400 chars): %s", text[:400])
+    logger.info(
+        "[IA] Texto bruto da resposta (primeiros 400 chars): %s", text[:400])
 
     if not text:
-        raise ValueError("Resposta vazia da IA para sugerir parâmetros")
+        raise ValueError(
+            "Resposta vazia da IA para sugerir parâmetros+comandos")
 
     # ---- tentar converter para JSON ----
     try:
@@ -214,10 +433,11 @@ PREFERÊNCIAS DO USUÁRIO:
         start = text.find("{")
         end = text.rfind("}")
         if start != -1 and end != -1 and end > start:
-            snippet = text[start : end + 1]
+            snippet = text[start: end + 1]
             data = json.loads(snippet)
             return data
-        logger.error("[IA] Não foi possível parsear JSON da resposta: %s", text)
+        logger.error(
+            "[IA] Não foi possível parsear JSON da resposta: %s", text)
         raise
 
 
@@ -230,15 +450,6 @@ class SugerirParametrosView(APIView):
     IA sugere parâmetros de parcelamento, sem gerar geometria.
 
     Endpoint: POST /api/ia-parcelamento/planos/<plano_id>/sugerir-parametros/
-
-    Payload esperado (mesmo do front):
-
-    {
-      "al_geom": { ...GeoJSON geometry... },
-      "params_iniciais": { ... },
-      "restricoes_resumo": { ... },
-      "preferencias_usuario": "texto livre"
-    }
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -246,22 +457,22 @@ class SugerirParametrosView(APIView):
     def post(self, request, plano_id: int, *args, **kwargs):
         plano = get_object_or_404(ParcelamentoPlano, pk=plano_id)
 
-        data = request.data if isinstance(request.data, dict) else {}
-        logger.info("[IA Sugerir] request.data = %s", data)
+        # Normaliza aliases usados no front (compatibilidade)
+        data_in = request.data.copy()
+        if "al_geom" not in data_in:
+            al_alt = data_in.get("alFeature") or data_in.get("al_geojson")
+            if isinstance(al_alt, dict) and al_alt.get("type") == "Feature":
+                al_alt = al_alt.get("geometry")
+            data_in["al_geom"] = al_alt
 
-        # Área loteável (opcional para a IA; se faltar, ela só tem menos contexto)
-        al_geom = data.get("al_geom") or data.get("alFeature") or data.get("al_geojson")
-        if isinstance(al_geom, dict) and al_geom.get("type") == "Feature":
-            al_geom = al_geom.get("geometry")
+        serializer = SugerirParametrosRequestSerializer(data=data_in)
+        serializer.is_valid(raise_exception=True)
+        v = serializer.validated_data
 
-        params_iniciais = data.get("params_iniciais") or data.get("params") or {}
-        restricoes_resumo = data.get("restricoes_resumo") or {}
-        preferencias_usuario = (
-            data.get("preferencias_usuario")
-            or data.get("prompt_usuario")
-            or data.get("prompt")
-            or ""
-        )
+        al_geom = v.get("al_geom")
+        params_iniciais = v.get("params_iniciais") or {}
+        restricoes_resumo = v.get("restricoes_resumo") or {}
+        preferencias_usuario = v.get("preferencias_usuario") or ""
 
         base_params = _merge_plan_params(plano, params_iniciais)
 
@@ -282,20 +493,48 @@ class SugerirParametrosView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # Garante chaves mínimas e devolve direto, sem serializer
-        params_sugeridos = ia_out.get("params_sugeridos") or {}
-        observacoes = ia_out.get("observacoes") or ""
-        elementos_especiais = ia_out.get("elementos_especiais") or []
+        # Garante chaves mínimas
+        versao_esquema = ia_out.get("versao_esquema")
+        parametros = ia_out.get("parametros") or {}
+        comandos = ia_out.get("comandos") or []
+        observacoes_urbanisticas = ia_out.get("observacoes_urbanisticas") or ""
+
+        # Mantém os nomes antigos para o front:
+        params_sugeridos = parametros
+
+        # elementos_especiais agora pode ser derivado dos comandos (descrição):
+        elementos_especiais = [
+            cmd.get("descricao")
+            for cmd in comandos
+            if isinstance(cmd, dict) and cmd.get("descricao")
+        ]
+
+        observacoes = observacoes_urbanisticas
 
         resp_data = {
             "params_sugeridos": params_sugeridos,
             "observacoes": observacoes,
             "elementos_especiais": elementos_especiais,
-            # opcional, mas útil pra debug:
-            "debug": {
-                "base_params": base_params,
-                "al_resumo": _summarize_al(al_geom),
-            },
+            # novos campos de debug/IA, se quiser usar no front depois:
+            "ia_esquema": versao_esquema,
+            "ia_comandos": comandos,
+        }
+
+        resp_data = {
+            "params_sugeridos": params_sugeridos,
+            "observacoes": observacoes,
+            "elementos_especiais": elementos_especiais,
+        }
+
+        # Opcional: validar resposta no serializer de saída (ajuda a pegar erro cedo)
+        out_ser = SugerirParametrosResponseSerializer(data=resp_data)
+        # não vou quebrar a request se vier algo extra
+        out_ser.is_valid(raise_exception=False)
+
+        # Adiciona bloco de debug fora do schema oficial (útil pro front, se quiser)
+        resp_data["debug"] = {
+            "base_params": base_params,
+            "al_resumo": _summarize_al(al_geom),
         }
 
         return Response(resp_data, status=status.HTTP_200_OK)
@@ -303,7 +542,7 @@ class SugerirParametrosView(APIView):
 
 class PreviewIaView(APIView):
     """
-    IA sugere parâmetros e já chama compute_preview,
+    IA sugere parâmetros e já chama compute_preview_com_comandos,
     retornando a prévia completa + metadados da IA.
     """
 
@@ -312,12 +551,22 @@ class PreviewIaView(APIView):
     def post(self, request, plano_id: int, *args, **kwargs):
         plano = get_object_or_404(ParcelamentoPlano, pk=plano_id)
 
-        data = request.data if isinstance(request.data, dict) else {}
-        logger.info("[IA Preview] request.data = %s", data)
+        # Normaliza aliases de entrada
+        data_in = request.data.copy()
+        if "al_geom" not in data_in:
+            al_alt = data_in.get("alFeature") or data_in.get("al_geojson")
+            if isinstance(al_alt, dict) and al_alt.get("type") == "Feature":
+                al_alt = al_alt.get("geometry")
+            data_in["al_geom"] = al_alt
 
-        al_geom = data.get("al_geom") or data.get("alFeature") or data.get("al_geojson")
-        if isinstance(al_geom, dict) and al_geom.get("type") == "Feature":
-            al_geom = al_geom.get("geometry")
+        serializer = PreviewIaRequestSerializer(data=data_in)
+        serializer.is_valid(raise_exception=True)
+        v = serializer.validated_data
+
+        al_geom = v.get("al_geom")
+        params_iniciais = v.get("params_iniciais") or v.get("params") or {}
+        restricoes_resumo = v.get("restricoes_resumo") or {}
+        preferencias_usuario = v.get("preferencias_usuario") or ""
 
         if not al_geom:
             return Response(
@@ -325,15 +574,7 @@ class PreviewIaView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        params_iniciais = data.get("params_iniciais") or data.get("params") or {}
-        restricoes_resumo = data.get("restricoes_resumo") or {}
-        preferencias_usuario = (
-            data.get("preferencias_usuario")
-            or data.get("prompt_usuario")
-            or data.get("prompt")
-            or ""
-        )
-
+        # base_params já vem com defaults do plano, com nomes esperados pelo backend
         base_params = _merge_plan_params(plano, params_iniciais)
 
         try:
@@ -347,24 +588,46 @@ class PreviewIaView(APIView):
             logger.exception("[IA Preview] Erro ao chamar IA: %s", e)
             return Response(
                 {
-                    "detail": "Erro ao chamar o modelo de IA para sugerir parâmetros.",
+                    "detail": "Erro ao chamar o modelo de IA para sugerir parâmetros e comandos.",
                     "error": str(e),
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        params_final = ia_out.get("params_sugeridos") or base_params
-        preview = compute_preview(al_geom, params_final)
+        # Novo contrato da IA
+        versao_esquema = ia_out.get("versao_esquema")
+        parametros_raw = ia_out.get("parametros") or {}
+        comandos = ia_out.get("comandos") or []
+        observacoes_urbanisticas = ia_out.get("observacoes_urbanisticas") or ""
+
+        # Normaliza os parâmetros da IA para o formato que o backend espera
+        params_final = _normalize_parametros_ia(parametros_raw, base_params)
+
+        # Aplica comandos PRE (ex.: criar_praca) e depois gera o parcelamento
+        preview = compute_preview_com_comandos(al_geom, params_final, comandos)
+
+        # Deriva elementos_especiais das descrições dos comandos
+        elementos_especiais = [
+            cmd.get("descricao")
+            for cmd in comandos
+            if isinstance(cmd, dict) and cmd.get("descricao")
+        ]
 
         resp_data = {
             **preview,
             "params_usados": params_final,
             "ia_metadata": {
-                "observacoes": ia_out.get("observacoes") or "",
-                "elementos_especiais": ia_out.get("elementos_especiais") or [],
-                "params_sugeridos": ia_out.get("params_sugeridos") or {},
+                "observacoes": observacoes_urbanisticas,
+                "elementos_especiais": elementos_especiais,
+                "parametros": parametros_raw,
+                "comandos": comandos,
+                "versao_esquema": versao_esquema,
             },
         }
+
+        # Opcional: validar só a casca do response com o serializer
+        out_ser = PreviewIaResponseSerializer(data=resp_data)
+        out_ser.is_valid(raise_exception=False)
 
         return Response(resp_data, status=status.HTTP_200_OK)
 
@@ -380,12 +643,22 @@ class SvgPreviewIaView(APIView):
     def post(self, request, plano_id: int, *args, **kwargs):
         plano = get_object_or_404(ParcelamentoPlano, pk=plano_id)
 
-        data = request.data if isinstance(request.data, dict) else {}
-        logger.info("[IA SVG] request.data = %s", data)
+        data_in = request.data.copy()
+        if "al_geom" not in data_in:
+            al_alt = data_in.get("alFeature") or data_in.get("al_geojson")
+            if isinstance(al_alt, dict) and al_alt.get("type") == "Feature":
+                al_alt = al_alt.get("geometry")
+            data_in["al_geom"] = al_alt
 
-        al_geom = data.get("al_geom") or data.get("alFeature") or data.get("al_geojson")
-        if isinstance(al_geom, dict) and al_geom.get("type") == "Feature":
-            al_geom = al_geom.get("geometry")
+        # Reaproveito o PreviewIaRequestSerializer só para validar entrada
+        serializer = PreviewIaRequestSerializer(data=data_in)
+        serializer.is_valid(raise_exception=True)
+        v = serializer.validated_data
+
+        al_geom = v.get("al_geom")
+        params_iniciais = v.get("params_iniciais") or v.get("params") or {}
+        restricoes_resumo = v.get("restricoes_resumo") or {}
+        preferencias_usuario = v.get("preferencias_usuario") or ""
 
         if not al_geom:
             return Response(
@@ -395,15 +668,6 @@ class SvgPreviewIaView(APIView):
                 },
                 status=status.HTTP_200_OK,
             )
-
-        params_iniciais = data.get("params_iniciais") or data.get("params") or {}
-        restricoes_resumo = data.get("restricoes_resumo") or {}
-        preferencias_usuario = (
-            data.get("preferencias_usuario")
-            or data.get("prompt_usuario")
-            or data.get("prompt")
-            or ""
-        )
 
         base_params = _merge_plan_params(plano, params_iniciais)
 
@@ -425,13 +689,15 @@ class SvgPreviewIaView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        params_final = ia_out.get("params_sugeridos") or base_params
+        parametros = ia_out.get("parametros") or {}
+        params_final = parametros or base_params
         preview = compute_preview(al_geom, params_final)
         lotes_fc = preview["lotes"]
         vias_area_fc = preview["vias_area"]
 
         # --- converte FCs em um SVG bem simples em coordenadas WGS84 (lon/lat) ---
-        from shapely.geometry import shape as shp_shape, Polygon, MultiPolygon
+        from shapely.geometry import MultiPolygon, Polygon
+        from shapely.geometry import shape as shp_shape
 
         xs, ys = [], []
         for fc in (lotes_fc, vias_area_fc):
@@ -504,12 +770,14 @@ class SvgPreviewIaView(APIView):
         for f in lotes_fc.get("features", []):
             g = shp_shape(f["geometry"])
             lotes_paths.append(
-                _poly_to_path(g, stroke="#f59e0b", fill="rgba(255,213,79,0.35)")
+                _poly_to_path(g, stroke="#f59e0b",
+                              fill="rgba(255,213,79,0.35)")
             )
         for f in vias_area_fc.get("features", []):
             g = shp_shape(f["geometry"])
             vias_paths.append(
-                _poly_to_path(g, stroke="#9ca3af", fill="rgba(156,163,175,0.8)")
+                _poly_to_path(g, stroke="#9ca3af",
+                              fill="rgba(156,163,175,0.8)")
             )
 
         svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000">

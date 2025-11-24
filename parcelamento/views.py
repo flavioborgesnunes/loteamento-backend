@@ -12,9 +12,8 @@ from rest_framework.response import Response
 from shapely.geometry import mapping, shape
 from shapely.ops import linemerge, unary_union
 
-from .models import Calcada  # <- certifique-se de ter migrado
-from .models import (Lote, ParcelamentoPlano, ParcelamentoVersao, Quarteirao,
-                     Via)
+from .models import (AreaPublica, Calcada, Lote, ParcelamentoPlano,
+                     ParcelamentoVersao, Quarteirao, Via)
 from .serializers import (LoteSerializer, MaterializarRequestSerializer,
                           PlanoSerializer, PreviewRequestSerializer,
                           PreviewResponseSerializer, QuarteiraoSerializer,
@@ -85,22 +84,26 @@ class PlanoViewSet(viewsets.ModelViewSet):
             params["orientacao_graus"] = float(plano.orientacao_graus)
 
         logger.info("[PREVIEW IN] params=%s", list(params.keys()))
-        logger.info("[PREVIEW IN] ruas_mask_fc=%s",
-                    self._summ_fc(params.get("ruas_mask_fc")))
-        logger.info("[PREVIEW IN] ruas_eixo_fc=%s",
-                    self._summ_fc(params.get("ruas_eixo_fc")))
+        logger.info(
+            "[PREVIEW IN] ruas_mask_fc=%s",
+            self._summ_fc(params.get("ruas_mask_fc")),
+        )
+        logger.info(
+            "[PREVIEW IN] ruas_eixo_fc=%s",
+            self._summ_fc(params.get("ruas_eixo_fc")),
+        )
 
         preview = compute_preview(al, params)
-        # preview deve incluir: vias (linhas), quarteiroes, lotes (com area_m2 e lot_number),
-        # calcadas (polígonos) e (NOVO) vias_area (polígonos cinza das vias criadas)
+        # preview inclui: vias, quarteiroes, lotes, calcadas, vias_area, areas_publicas, metrics
 
         logger.info(
-            "[PREVIEW OUT] vias=%d quarteiroes=%d lotes=%d calcadas=%d vias_area=%d",
+            "[PREVIEW OUT] vias=%d quarteiroes=%d lotes=%d calcadas=%d vias_area=%d areas_publicas=%d",
             len(preview["vias"]["features"]),
             len(preview["quarteiroes"]["features"]),
             len(preview["lotes"]["features"]),
             len(preview.get("calcadas", {}).get("features", [])),
             len(preview.get("vias_area", {}).get("features", [])),
+            len(preview.get("areas_publicas", {}).get("features", [])),
         )
         return Response(preview, status=200)
 
@@ -108,6 +111,10 @@ class PlanoViewSet(viewsets.ModelViewSet):
     def materializar(self, request, pk=None):
         """
         Mesmo contrato do preview; materializa em versão.
+
+        OBS importante: hoje ele materializa a partir do preview calculado
+        (sem considerar edições feitas no front). Depois podemos criar um
+        endpoint separado para "salvar versão a partir dos FC editados".
         """
         plano = self.get_object()
         req = MaterializarRequestSerializer(data=request.data)
@@ -149,12 +156,18 @@ class PlanoViewSet(viewsets.ModelViewSet):
 
             # Vias
             for f in preview["vias"]["features"]:
+                props = f.get("properties") or {}
                 Via.objects.create(
                     versao=versao,
                     geom=GEOSGeometry(json.dumps(f["geometry"]), srid=4326),
-                    largura_m=float(f["properties"].get(
-                        "largura_m", params["larg_rua_vert_m"])),
-                    tipo=f["properties"].get("tipo", "vertical"),
+                    largura_m=float(
+                        props.get("largura_m", params["larg_rua_vert_m"])
+                    ),
+                    tipo=props.get("tipo", "vertical"),
+                    categoria=props.get("categoria", "local"),
+                    nome=props.get("nome", ""),
+                    is_ponte=bool(props.get("is_ponte", False)),
+                    ponte_sobre=props.get("ponte_sobre", ""),
                 )
 
             # Quarteirões
@@ -166,28 +179,47 @@ class PlanoViewSet(viewsets.ModelViewSet):
 
             # Calçadas (se vierem no preview)
             for f in preview.get("calcadas", {}).get("features", []):
+                props = f.get("properties") or {}
                 Calcada.objects.create(
                     versao=versao,
                     geom=GEOSGeometry(json.dumps(f["geometry"]), srid=4326),
-                    largura_m=float(
-                        f.get("properties", {}).get("largura_m", 2.5)),
+                    largura_m=float(props.get("largura_m", 2.5)),
+                )
+
+            # Áreas públicas (se vierem no preview — hoje o heurístico manda vazio,
+            # mas a IA pode preencher isso no futuro)
+            for f in preview.get("areas_publicas", {}).get("features", []):
+                props = f.get("properties") or {}
+                AreaPublica.objects.create(
+                    versao=versao,
+                    geom=GEOSGeometry(json.dumps(f["geometry"]), srid=4326),
+                    tipo=props.get("tipo", "praca"),
+                    nome=props.get("nome", ""),
+                    descricao=props.get("descricao", ""),
                 )
 
             # Lotes
             for f in preview["lotes"]["features"]:
+                props = f.get("properties") or {}
                 Lote.objects.create(
                     versao=versao,
                     geom=GEOSGeometry(json.dumps(f["geometry"]), srid=4326),
-                    area_m2=float(f["properties"].get("area_m2", 0)),
-                    frente_m=float(f["properties"].get("frente_aprox_m", 0)),
-                    prof_media_m=float(f["properties"].get("prof_aprox_m", 0)),
-                    score_qualidade=float(
-                        f["properties"].get("score_qualidade", 0)),
+                    area_m2=float(props.get("area_m2", 0)),
+                    frente_m=float(props.get("frente_m", 0)),  # corrigido
+                    prof_media_m=float(
+                        props.get("prof_media_m", 0)),  # corrigido
+                    orientacao_graus=props.get("orientacao_graus"),
+                    score_qualidade=float(props.get("score_qualidade", 0)),
                     frente_min_m=params["frente_min_m"],
                     prof_min_m=params["prof_min_m"],
+                    numero=int(props.get("numero", 0)),
+                    quadra=props.get("quadra", ""),
                 )
 
-        return Response({"versao_id": versao.id, "metrics": preview["metrics"]}, status=201)
+        return Response(
+            {"versao_id": versao.id, "metrics": preview["metrics"]},
+            status=201,
+        )
 
     @action(detail=True, methods=["post"])
     def recalcular(self, request, pk=None):
@@ -206,10 +238,13 @@ class PlanoViewSet(viewsets.ModelViewSet):
             def _tx(x, y, z=None):
                 x2, y2 = transformer.transform(x, y)
                 return (x2, y2) if z is None else (x2, y2, z)
+
             return shp_transform(_tx, geom)
 
         lotes_fc = req.validated_data.get("lotes_fc") or {
-            "type": "FeatureCollection", "features": []}
+            "type": "FeatureCollection",
+            "features": [],
+        }
         renum = req.validated_data.get("renumerar", True)
 
         srid_calc = int(request.data.get("srid_calc", 3857))
@@ -227,7 +262,9 @@ class PlanoViewSet(viewsets.ModelViewSet):
                 area_m2 = float(abs(g_m.area))
                 props = dict(f.get("properties") or {})
                 if renum:
+                    # mantém compatibilidade com o nome antigo e o novo
                     props["lot_number"] = lot_num
+                    props["numero"] = lot_num
                     lot_num += 1
                 props["area_m2"] = round(area_m2, 2)
 
@@ -243,11 +280,24 @@ class PlanoViewSet(viewsets.ModelViewSet):
                     props["label_corner"] = [corner_w.x, corner_w.y]
 
                 out_features.append(
-                    {"type": "Feature", "properties": props, "geometry": f["geometry"]})
+                    {
+                        "type": "Feature",
+                        "properties": props,
+                        "geometry": f["geometry"],
+                    }
+                )
             except Exception:
                 continue
 
-        return Response({"lotes": {"type": "FeatureCollection", "features": out_features}}, status=200)
+        return Response(
+            {
+                "lotes": {
+                    "type": "FeatureCollection",
+                    "features": out_features,
+                }
+            },
+            status=200,
+        )
 
 
 class VersaoViewSet(viewsets.ReadOnlyModelViewSet):
@@ -258,23 +308,39 @@ class VersaoViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=["get"])
     def geojson(self, request, pk=None):
         """
-        Devolve Via (linhas), Quarteiroes, Lotes, Calcadas e (NOVO) vias_area
-        (áreas cinza) calculadas a partir do buffer dos eixos de via.
+        Devolve:
+          - Vias (linhas)
+          - Quarteiroes
+          - Lotes
+          - Calcadas
+          - vias_area (áreas cinza)
+          - areas_publicas
         """
         versao = self.get_object()
 
         vias = [
             {
                 "type": "Feature",
-                "properties": {"id": v.id, "tipo": v.tipo, "largura_m": float(v.largura_m)},
+                "properties": {
+                    "id": v.id,
+                    "tipo": v.tipo,
+                    "largura_m": float(v.largura_m),
+                    "categoria": v.categoria,
+                    "nome": v.nome,
+                    "is_ponte": v.is_ponte,
+                    "ponte_sobre": v.ponte_sobre,
+                },
                 "geometry": json.loads(v.geom.geojson),
             }
             for v in versao.vias.all()
         ]
 
         quarts = [
-            {"type": "Feature", "properties": {"id": q.id},
-                "geometry": json.loads(q.geom.geojson)}
+            {
+                "type": "Feature",
+                "properties": {"id": q.id},
+                "geometry": json.loads(q.geom.geojson),
+            }
             for q in versao.quarteiroes.all()
         ]
 
@@ -287,6 +353,13 @@ class VersaoViewSet(viewsets.ReadOnlyModelViewSet):
                     "frente_m": float(l.frente_m),
                     "prof_media_m": float(l.prof_media_m),
                     "score_qualidade": float(l.score_qualidade),
+                    "orientacao_graus": float(l.orientacao_graus)
+                    if l.orientacao_graus is not None
+                    else None,
+                    "frente_min_m": float(l.frente_min_m),
+                    "prof_min_m": float(l.prof_min_m),
+                    "numero": l.numero,
+                    "quadra": l.quadra,
                 },
                 "geometry": json.loads(l.geom.geojson),
             }
@@ -296,13 +369,30 @@ class VersaoViewSet(viewsets.ReadOnlyModelViewSet):
         calcadas = [
             {
                 "type": "Feature",
-                "properties": {"id": c.id, "largura_m": float(c.largura_m)},
+                "properties": {
+                    "id": c.id,
+                    "largura_m": float(c.largura_m),
+                },
                 "geometry": json.loads(c.geom.geojson),
             }
             for c in versao.calcadas.all()
         ]
 
-        # --------- NOVO: vias_area a partir do buffer dos eixos ---------
+        areas_publicas = [
+            {
+                "type": "Feature",
+                "properties": {
+                    "id": a.id,
+                    "tipo": a.tipo,
+                    "nome": a.nome,
+                    "descricao": a.descricao,
+                },
+                "geometry": json.loads(a.geom.geojson),
+            }
+            for a in versao.areas_publicas.all()
+        ]
+
+        # --------- vias_area a partir do buffer dos eixos ---------
         try:
             from shapely.geometry import shape as shp_shape
             from shapely.ops import unary_union
@@ -316,16 +406,19 @@ class VersaoViewSet(viewsets.ReadOnlyModelViewSet):
                 width = float(v.largura_m or 0)
                 half = max(width, 0.0) / 2.0
                 # buffer em graus (ok pra visual; seus dados são WGS84)
-                # se quiser preciso em metros, projete no SRID da versão.
                 b = s.buffer(half, cap_style=2, join_style=2)
                 if not b.is_empty:
                     buffers.append(b)
             ua = unary_union(buffers) if buffers else None
             vias_area = []
             if ua and not ua.is_empty:
-                # pode sair MultiPolygon/Polygon
                 def _to_geo(g):
-                    return {"type": "Feature", "properties": {}, "geometry": mapping(g)}
+                    return {
+                        "type": "Feature",
+                        "properties": {},
+                        "geometry": mapping(g),
+                    }
+
                 if hasattr(ua, "geoms"):
                     vias_area = [_to_geo(g) for g in ua.geoms]
                 else:
@@ -340,7 +433,11 @@ class VersaoViewSet(viewsets.ReadOnlyModelViewSet):
                 "quarteiroes": {"type": "FeatureCollection", "features": quarts},
                 "lotes": {"type": "FeatureCollection", "features": lotes},
                 "calcadas": {"type": "FeatureCollection", "features": calcadas},
-                "vias_area": vias_area_fc,  # <- áreas cinza para oficiais
+                "vias_area": vias_area_fc,
+                "areas_publicas": {
+                    "type": "FeatureCollection",
+                    "features": areas_publicas,
+                },
             },
             status=200,
         )
@@ -356,9 +453,17 @@ class VersaoViewSet(viewsets.ReadOnlyModelViewSet):
                 border = linemerge(border)
             except Exception:
                 pass
-            lotes_lin.append({"type": "Feature", "properties": {
-                             "id": l.id}, "geometry": mapping(border)})
-        return Response({"type": "FeatureCollection", "features": lotes_lin}, status=200)
+            lotes_lin.append(
+                {
+                    "type": "Feature",
+                    "properties": {"id": l.id},
+                    "geometry": mapping(border),
+                }
+            )
+        return Response(
+            {"type": "FeatureCollection", "features": lotes_lin},
+            status=200,
+        )
 
     @action(detail=True, methods=["post"])
     def kml(self, request, pk=None):
@@ -366,7 +471,10 @@ class VersaoViewSet(viewsets.ReadOnlyModelViewSet):
         try:
             import simplekml
         except ImportError:
-            return Response({"detail": "Instale simplekml (pip install simplekml)"}, status=400)
+            return Response(
+                {"detail": "Instale simplekml (pip install simplekml)"},
+                status=400,
+            )
 
         kml = simplekml.Kml()
 
@@ -413,8 +521,20 @@ class VersaoViewSet(viewsets.ReadOnlyModelViewSet):
 
         f_l = kml.newfolder(name="Lotes")
         for l in versao.lotes.all():
-            add_poly(f_l, json.loads(l.geom.geojson),
-                     f"Lote {l.id} ({l.area_m2} m2)")
+            add_poly(
+                f_l,
+                json.loads(l.geom.geojson),
+                f"Lote {l.id} ({l.area_m2} m2)",
+            )
+
+        # (opcional) poderíamos adicionar Áreas Públicas no KML também
+        f_ap = kml.newfolder(name="Areas Publicas")
+        for a in versao.areas_publicas.all():
+            add_poly(
+                f_ap,
+                json.loads(a.geom.geojson),
+                f"AreaPublica {a.id} ({a.get_tipo_display()})",
+            )
 
         path = f"/tmp/parcelamento_versao_{versao.id}.kml"
         kml.save(path)
