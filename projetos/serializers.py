@@ -25,11 +25,16 @@ class ProjectSerializer(serializers.ModelSerializer):
 
     def get_owner_nome(self, obj):
         u = getattr(obj, "owner", None)
-        return getattr(u, "nome", None) if u else None
+        if not u:
+            return None
+        # usa o método que já faz fallback para nome completo ou email
+        return u.get_full_name()
 
     def get_dono_nome(self, obj):
         u = getattr(obj, "dono", None)
-        return getattr(u, "nome", None) if u else None
+        if not u:
+            return None
+        return u.get_full_name()
 
     def get_owner_email(self, obj):
         u = getattr(obj, "owner", None)

@@ -119,13 +119,24 @@ def _resolve_dono(user):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def list_projects(request):
-    """
-    GET /api/projetos/
-    Retorna todos os projetos (somente leitura liberada para todos autenticados).
-    """
-    qs = Project.objects.all().order_by("-created_at")
-    # 🔑 Não filtra por dono aqui → leitura liberada
-    return Response(ProjectSerializer(qs, many=True).data)
+    user = request.user
+
+    # se for dono, ele é o tenant
+    # se for adm/comum, o tenant é o dono dele
+    if getattr(user, "role", None) == "dono":
+        tenant = user
+    else:
+        tenant = user.dono or user  # fallback se por acaso dono vier vazio
+
+    qs = Project.objects.filter(dono=tenant).order_by(
+        "-updated_at", "-created_at")
+
+    # se quiser que superuser veja tudo:
+    # if user.is_superuser:
+    #     qs = Project.objects.all().order_by("-updated_at", "-created_at")
+
+    serializer = ProjectSerializer(qs, many=True)
+    return Response(serializer.data)
 
 
 @api_view(["PATCH", "DELETE"])

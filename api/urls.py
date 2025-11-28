@@ -84,6 +84,10 @@ urlpatterns = [
          restricoes_views.RestricoesListByProjectAPIView.as_view()),
     path("restricoes/<int:restricoes_id>/geo/",
          restricoes_views.RestricoesGeoDetailAPIView.as_view()),
+    path(
+        "restricoes/todas-do-dono/",
+        restricoes_views.RestricoesListByDonoAPIView.as_view(),
+    ),
 
     # Parcelamento:
     # Planos

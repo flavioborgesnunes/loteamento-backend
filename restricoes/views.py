@@ -1,37 +1,36 @@
 from __future__ import annotations
+
 import json
+import math
 from typing import Any, Dict, List
 
-from django.db import transaction, models as djmodels
+from django.contrib.gis.geos import (GeometryCollection, GEOSGeometry,
+                                     MultiLineString, MultiPolygon, Polygon)
+from django.db import models as djmodels
+from django.db import transaction
 from django.shortcuts import get_object_or_404
-from rest_framework import status, permissions
-from rest_framework.response import Response
-from rest_framework.views import APIView
+from projetos.models import Project
+from pyproj import Transformer
+from rest_framework import permissions, status
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import IsAuthenticated
-
-from shapely.geometry import shape, mapping
-from shapely.ops import unary_union, snap
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from shapely.geometry import mapping, shape
+from shapely.ops import snap, unary_union
 from shapely.validation import make_valid as shapely_make_valid
-from pyproj import Transformer
-import math
 
-from django.contrib.gis.geos import GEOSGeometry, MultiPolygon, MultiLineString, Polygon
-from django.contrib.gis.geos import GeometryCollection
-
-from .models import (
-    Restricoes, AreaVerdeV, CorteAreaVerdeV, RuaV,
-    MargemRioV, MargemLTV, MargemFerroviaV, SRID_WGS,
-    ManualRestricaoV,  # ---- MANUAIS
-)
+from .models import ManualRestricaoV  # ---- MANUAIS
+from .models import (SRID_WGS, AreaVerdeV, CorteAreaVerdeV, MargemFerroviaV,
+                     MargemLTV, MargemRioV, Restricoes, RuaV)
 from .serializers import RestricoesSerializer
-from projetos.models import Project
 
 SRID_IN = 4326
 SRID_WEBMERC = 3857
 SNAP_GRID = 1e-7
 
 # --- helpers para unir / diferenciar / medir ---
+
 
 def _union_mpolys_4674(polys) -> MultiPolygon | None:
     acc = None
@@ -49,6 +48,7 @@ def _union_mpolys_4674(polys) -> MultiPolygon | None:
         return None
     return _ensure_mpoly_4674(acc)
 
+
 def _diff_clip(aoi_mp_4674: MultiPolygon, sub_mp_4674: MultiPolygon | None) -> MultiPolygon | None:
     if not aoi_mp_4674 or aoi_mp_4674.empty:
         return None
@@ -64,6 +64,7 @@ def _diff_clip(aoi_mp_4674: MultiPolygon, sub_mp_4674: MultiPolygon | None) -> M
     except Exception:
         return None
 
+
 def _area_m2(mp_4674: GEOSGeometry) -> float:
     if not mp_4674 or mp_4674.empty:
         return 0.0
@@ -77,6 +78,7 @@ def _area_m2(mp_4674: GEOSGeometry) -> float:
 
 # ---------- Helpers mínimos e robustos ----------
 
+
 def _geos_to_shp(g):
     if not g or g.empty:
         return None
@@ -84,6 +86,7 @@ def _geos_to_shp(g):
         return shape(json.loads(g.geojson))
     except Exception:
         return None
+
 
 def _shp_to_geos(s, srid=SRID_WGS):
     if s is None:
@@ -96,6 +99,7 @@ def _shp_to_geos(s, srid=SRID_WGS):
     except Exception:
         return None
 
+
 def _ensure_srid(g: GEOSGeometry, srid: int) -> GEOSGeometry:
     if not g:
         return g
@@ -103,6 +107,7 @@ def _ensure_srid(g: GEOSGeometry, srid: int) -> GEOSGeometry:
     if not getattr(gg, "srid", None):
         gg.srid = srid
     return gg
+
 
 def _ensure_mpoly_4674(g: GEOSGeometry) -> MultiPolygon:
     if not g:
@@ -129,6 +134,7 @@ def _ensure_mpoly_4674(g: GEOSGeometry) -> MultiPolygon:
         return gj
     raise ValueError(f"_ensure_mpoly_4674: tipo inesperado {gg.geom_type}")
 
+
 def _debug_geom(label: str, g: GEOSGeometry):
     try:
         if not g or g.empty:
@@ -145,6 +151,7 @@ def _debug_geom(label: str, g: GEOSGeometry):
     except Exception as e:
         print(f"[restricoes][{label}] ERROR: {e}")
 
+
 def _force_2d(g: GEOSGeometry) -> GEOSGeometry:
     gg = g.clone()
     try:
@@ -153,11 +160,13 @@ def _force_2d(g: GEOSGeometry) -> GEOSGeometry:
         pass
     return gg
 
+
 def _make_valid(g: GEOSGeometry) -> GEOSGeometry:
     try:
         return g.make_valid()
     except Exception:
         return g
+
 
 def _snap_4326_small(g: GEOSGeometry) -> GEOSGeometry:
     gg = _to_srid(g, SRID_IN)
@@ -165,6 +174,7 @@ def _snap_4326_small(g: GEOSGeometry) -> GEOSGeometry:
         return gg.snap_to_grid(SNAP_GRID)
     except Exception:
         return gg
+
 
 def _norm_line_4674(g: GEOSGeometry) -> MultiLineString:
     if not getattr(g, "srid", None):
@@ -208,12 +218,14 @@ def _norm_line_4674(g: GEOSGeometry) -> MultiLineString:
             ml = MultiLineString(*fixed)
             ml.srid = SRID_WGS
             return ml
-        raise ValueError(f"Esperado LineString/MultiLineString, recebi {x.geom_type}")
+        raise ValueError(
+            f"Esperado LineString/MultiLineString, recebi {x.geom_type}")
 
     ml = _as_mls_4674(gg)
     if not getattr(ml, "srid", None):
         ml.srid = SRID_WGS
     return ml
+
 
 def _norm_poly_4674(g: GEOSGeometry) -> MultiPolygon:
     gg = _force_2d(_ensure_srid(g, SRID_IN))
@@ -230,7 +242,8 @@ def _norm_poly_4674(g: GEOSGeometry) -> MultiPolygon:
         gg.srid = SRID_WGS
         return gg
     if gg.geom_type == "GeometryCollection":
-        polys = [geom for geom in gg if geom.geom_type in ("Polygon", "MultiPolygon")]
+        polys = [geom for geom in gg if geom.geom_type in (
+            "Polygon", "MultiPolygon")]
         if not polys:
             raise ValueError("Sem Polygon em GeometryCollection")
         acc = None
@@ -247,11 +260,12 @@ def _norm_poly_4674(g: GEOSGeometry) -> MultiPolygon:
             return acc
     raise ValueError(f"Esperado Polygon/MultiPolygon, recebi {gg.geom_type}")
 
+
 def _buffer_meters_stable_clip_aoi(line_4674: GEOSGeometry, meters: float, aoi_4674: MultiPolygon) -> MultiPolygon | None:
     if not line_4674 or meters is None or float(meters) <= 0:
         return None
     line_4674 = _ensure_srid(line_4674, SRID_WGS)
-    aoi_4674  = _ensure_mpoly_4674(aoi_4674)
+    aoi_4674 = _ensure_mpoly_4674(aoi_4674)
     try:
         g4326 = _to_srid(line_4674, SRID_IN)
         g3857 = _to_srid(g4326, SRID_WEBMERC)
@@ -278,10 +292,12 @@ def _buffer_meters_stable_clip_aoi(line_4674: GEOSGeometry, meters: float, aoi_4
     except Exception:
         return None
 
+
 def _iter_fc(fc):
     if not fc or fc.get("type") != "FeatureCollection":
         return []
     return fc.get("features") or []
+
 
 def _from_geojson(geom_dict: Dict[str, Any], srid_default: int = SRID_IN) -> GEOSGeometry:
     g = GEOSGeometry(json.dumps(geom_dict))
@@ -291,11 +307,13 @@ def _from_geojson(geom_dict: Dict[str, Any], srid_default: int = SRID_IN) -> GEO
         g = GEOSGeometry(g.wkt, srid=srid_default)
     return g
 
+
 def _to_srid(g: GEOSGeometry, srid: int) -> GEOSGeometry:
     gg = g.clone()
     if gg.srid != srid:
         gg.transform(srid)
     return gg
+
 
 def _get_prop(props: Dict[str, Any], key: str, default: Any = None) -> Any:
     if not isinstance(props, dict):
@@ -304,13 +322,16 @@ def _get_prop(props: Dict[str, Any], key: str, default: Any = None) -> Any:
 
 # ---------- Remover Filete ------------
 
+
 def _pick_utm_epsg_from_lonlat(lon, lat):
     zone = int(math.floor((lon + 180) / 6) + 1)
     south = lat < 0
-    mapping_utm_sul = {18:31978, 19:31979, 20:31980, 21:31981, 22:31982, 23:31983, 24:31984, 25:31985}
+    mapping_utm_sul = {18: 31978, 19: 31979, 20: 31980,
+                       21: 31981, 22: 31982, 23: 31983, 24: 31984, 25: 31985}
     if south and zone in mapping_utm_sul:
         return mapping_utm_sul[zone]
     return 3857
+
 
 def _to_metric_transformers(geom_4674):
     lon, lat = geom_4674.representative_point().x, geom_4674.representative_point().y
@@ -319,12 +340,14 @@ def _to_metric_transformers(geom_4674):
     rev = Transformer.from_crs(epsg, 4674, always_xy=True).transform
     return fwd, rev
 
+
 def _proj(geom, fn):
     try:
         return geom if geom is None else geom.transform(fn)
     except Exception:
         from shapely.ops import transform
         return geom if geom is None else transform(fn, geom)
+
 
 def _clean_union(polys):
     shp_list = []
@@ -347,6 +370,7 @@ def _clean_union(polys):
         pass
     return (u if (u is not None and not u.is_empty) else None)
 
+
 def _drop_small_parts(geom, min_area_m2=0.05):
     if not geom or geom.is_empty:
         return None
@@ -360,6 +384,7 @@ def _drop_small_parts(geom, min_area_m2=0.05):
         return ShpMP(parts)
     return geom
 
+
 def robust_diff_m(aoi_4674, excl_4674, snap_tol_m=0.05, eps_m=0.02, min_area_m2=0.05):
     if not aoi_4674 or aoi_4674.is_empty:
         return None
@@ -367,15 +392,15 @@ def robust_diff_m(aoi_4674, excl_4674, snap_tol_m=0.05, eps_m=0.02, min_area_m2=
         return shapely_make_valid(aoi_4674)
 
     fwd, rev = _to_metric_transformers(aoi_4674)
-    aoi_m  = _proj(shapely_make_valid(aoi_4674), fwd)
+    aoi_m = _proj(shapely_make_valid(aoi_4674), fwd)
     excl_m = _proj(shapely_make_valid(excl_4674), fwd)
 
-    aoi_s  = snap(aoi_m,  excl_m, snap_tol_m)
+    aoi_s = snap(aoi_m,  excl_m, snap_tol_m)
     excl_s = snap(excl_m, aoi_s,  snap_tol_m)
 
     excl_grow = excl_s.buffer(eps_m)
-    diff_raw  = aoi_s.difference(excl_grow)
-    diff_fix  = diff_raw.buffer(-eps_m)
+    diff_raw = aoi_s.difference(excl_grow)
+    diff_fix = diff_raw.buffer(-eps_m)
 
     try:
         diff_fix = shapely_make_valid(diff_fix)
@@ -387,6 +412,7 @@ def robust_diff_m(aoi_4674, excl_4674, snap_tol_m=0.05, eps_m=0.02, min_area_m2=
     return None
 
 # ---------- CREATE versão ----------
+
 
 class RestricoesCreateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -413,17 +439,17 @@ class RestricoesCreateAPIView(APIView):
         except Exception as e:
             return Response({"detail": f"AOI inválida: {e}"}, status=status.HTTP_400_BAD_REQUEST)
 
-        av_fc        = ad_hoc.get("av") or {}
-        corte_fc     = ad_hoc.get("corte_av") or {}
-        ruas_fc      = ad_hoc.get("ruas") or {}
-        rios_fc      = ad_hoc.get("rios") or {}
-        lt_fc        = ad_hoc.get("lt") or {}
-        fer_fc       = ad_hoc.get("ferrovias") or {}
-        manuais_fc   = ad_hoc.get("manuais") or {}   # ---- MANUAIS
+        av_fc = ad_hoc.get("av") or {}
+        corte_fc = ad_hoc.get("corte_av") or {}
+        ruas_fc = ad_hoc.get("ruas") or {}
+        rios_fc = ad_hoc.get("rios") or {}
+        lt_fc = ad_hoc.get("lt") or {}
+        fer_fc = ad_hoc.get("ferrovias") or {}
+        manuais_fc = ad_hoc.get("manuais") or {}   # ---- MANUAIS
 
         default_rua_width = ad_hoc.get("default_rua_width", 12)
         def_margem_rio = ad_hoc.get("def_margem_rio", 30)
-        def_margem_lt  = ad_hoc.get("def_margem_lt", 15)
+        def_margem_lt = ad_hoc.get("def_margem_lt", 15)
         def_margem_fer = ad_hoc.get("def_margem_fer", 20)
 
         with transaction.atomic():
@@ -475,7 +501,8 @@ class RestricoesCreateAPIView(APIView):
                 props = feat.get("properties") or {}
                 largura = _get_prop(props, "width_m", default_rua_width)
                 try:
-                    largura = float(largura) if largura is not None else float(default_rua_width)
+                    largura = float(largura) if largura is not None else float(
+                        default_rua_width)
                 except Exception:
                     largura = float(default_rua_width or 12)
                 try:
@@ -486,14 +513,17 @@ class RestricoesCreateAPIView(APIView):
                     _debug_geom("rua.eixo", eixo)
                 except Exception:
                     continue
-                mask = _buffer_meters_stable_clip_aoi(eixo, largura/2.0, aoi_snapshot)
+                mask = _buffer_meters_stable_clip_aoi(
+                    eixo, largura/2.0, aoi_snapshot)
                 if mask:
                     mask = _ensure_mpoly_4674(mask)
                 _debug_geom("rua.mask", mask)
                 try:
-                    rua_bulk.append(RuaV(restricoes=r, eixo=eixo, largura_m=largura, mask=mask))
+                    rua_bulk.append(
+                        RuaV(restricoes=r, eixo=eixo, largura_m=largura, mask=mask))
                 except TypeError:
-                    rua_bulk.append(RuaV(restricoes=r, eixo=eixo, largura_m=largura))
+                    rua_bulk.append(
+                        RuaV(restricoes=r, eixo=eixo, largura_m=largura))
             if rua_bulk:
                 RuaV.objects.bulk_create(rua_bulk, batch_size=500)
 
@@ -506,7 +536,8 @@ class RestricoesCreateAPIView(APIView):
                 props = feat.get("properties") or {}
                 margem_val = _get_prop(props, "margem_m", def_margem_rio)
                 try:
-                    margem = float(margem_val) if margem_val is not None else float(def_margem_rio)
+                    margem = float(margem_val) if margem_val is not None else float(
+                        def_margem_rio)
                 except Exception:
                     margem = float(def_margem_rio)
                 try:
@@ -517,11 +548,13 @@ class RestricoesCreateAPIView(APIView):
                     _debug_geom("rio.centerline", line)
                 except Exception:
                     continue
-                faixa = _buffer_meters_stable_clip_aoi(line, margem, aoi_snapshot)
+                faixa = _buffer_meters_stable_clip_aoi(
+                    line, margem, aoi_snapshot)
                 if faixa:
                     faixa = _ensure_mpoly_4674(faixa)
                 _debug_geom("rio.faixa", faixa)
-                rio_bulk.append(MargemRioV(restricoes=r, centerline=line, margem_m=margem, faixa=faixa))
+                rio_bulk.append(MargemRioV(
+                    restricoes=r, centerline=line, margem_m=margem, faixa=faixa))
             if rio_bulk:
                 MargemRioV.objects.bulk_create(rio_bulk, batch_size=500)
 
@@ -534,7 +567,8 @@ class RestricoesCreateAPIView(APIView):
                 props = feat.get("properties") or {}
                 margem_val = _get_prop(props, "margem_m", def_margem_lt)
                 try:
-                    margem = float(margem_val) if margem_val is not None else float(def_margem_lt)
+                    margem = float(margem_val) if margem_val is not None else float(
+                        def_margem_lt)
                 except Exception:
                     margem = float(def_margem_lt)
                 try:
@@ -545,11 +579,13 @@ class RestricoesCreateAPIView(APIView):
                     _debug_geom("lt.centerline", line)
                 except Exception:
                     continue
-                faixa = _buffer_meters_stable_clip_aoi(line, margem, aoi_snapshot)
+                faixa = _buffer_meters_stable_clip_aoi(
+                    line, margem, aoi_snapshot)
                 if faixa:
                     faixa = _ensure_mpoly_4674(faixa)
                 _debug_geom("lt.faixa", faixa)
-                lt_bulk.append(MargemLTV(restricoes=r, centerline=line, margem_m=margem, faixa=faixa))
+                lt_bulk.append(
+                    MargemLTV(restricoes=r, centerline=line, margem_m=margem, faixa=faixa))
             if lt_bulk:
                 MargemLTV.objects.bulk_create(lt_bulk, batch_size=500)
 
@@ -562,7 +598,8 @@ class RestricoesCreateAPIView(APIView):
                 props = feat.get("properties") or {}
                 margem_val = _get_prop(props, "margem_m", def_margem_fer)
                 try:
-                    margem = float(margem_val) if margem_val is not None else float(def_margem_fer)
+                    margem = float(margem_val) if margem_val is not None else float(
+                        def_margem_fer)
                 except Exception:
                     margem = float(def_margem_fer)
                 try:
@@ -573,11 +610,13 @@ class RestricoesCreateAPIView(APIView):
                     _debug_geom("fer.centerline", line)
                 except Exception:
                     continue
-                faixa = _buffer_meters_stable_clip_aoi(line, margem, aoi_snapshot)
+                faixa = _buffer_meters_stable_clip_aoi(
+                    line, margem, aoi_snapshot)
                 if faixa:
                     faixa = _ensure_mpoly_4674(faixa)
                 _debug_geom("fer.faixa", faixa)
-                fer_bulk.append(MargemFerroviaV(restricoes=r, centerline=line, margem_m=margem, faixa=faixa))
+                fer_bulk.append(MargemFerroviaV(
+                    restricoes=r, centerline=line, margem_m=margem, faixa=faixa))
             if fer_bulk:
                 MargemFerroviaV.objects.bulk_create(fer_bulk, batch_size=500)
 
@@ -590,31 +629,39 @@ class RestricoesCreateAPIView(APIView):
                     continue
                 try:
                     g = _ensure_mpoly_4674(_from_geojson(geom))
-                    nm = str(props.get("name") or props.get("nome") or "").strip()
-                    manuais_bulk.append(ManualRestricaoV(restricoes=r, name=nm, geom=g))
+                    nm = str(props.get("name") or props.get(
+                        "nome") or "").strip()
+                    manuais_bulk.append(ManualRestricaoV(
+                        restricoes=r, name=nm, geom=g))
                 except Exception:
                     continue
             if manuais_bulk:
-                ManualRestricaoV.objects.bulk_create(manuais_bulk, batch_size=500)
+                ManualRestricaoV.objects.bulk_create(
+                    manuais_bulk, batch_size=500)
 
             # ---------- ÁREA LOTEÁVEL ----------
             try:
                 masks_polys = []
-                masks_polys.extend([row.mask for row in rua_bulk if getattr(row, "mask", None)])
-                masks_polys.extend([row.faixa for row in rio_bulk if getattr(row, "faixa", None)])
-                masks_polys.extend([row.faixa for row in lt_bulk  if getattr(row, "faixa", None)])
-                masks_polys.extend([row.faixa for row in fer_bulk if getattr(row, "faixa", None)])
+                masks_polys.extend(
+                    [row.mask for row in rua_bulk if getattr(row, "mask", None)])
+                masks_polys.extend(
+                    [row.faixa for row in rio_bulk if getattr(row, "faixa", None)])
+                masks_polys.extend(
+                    [row.faixa for row in lt_bulk if getattr(row, "faixa", None)])
+                masks_polys.extend(
+                    [row.faixa for row in fer_bulk if getattr(row, "faixa", None)])
                 union_masks = _union_mpolys_4674(masks_polys)
 
-                av_polys    = [row.geom for row in av_bulk]
+                av_polys = [row.geom for row in av_bulk]
                 corte_polys = [row.geom for row in corte_bulk]
-                av_total    = _union_mpolys_4674(av_polys)
+                av_total = _union_mpolys_4674(av_polys)
                 corte_total = _union_mpolys_4674(corte_polys)
-                av_efetiva  = None
+                av_efetiva = None
                 if av_total:
                     if corte_total:
                         try:
-                            av_efetiva = _norm_poly_4674(av_total.difference(corte_total))
+                            av_efetiva = _norm_poly_4674(
+                                av_total.difference(corte_total))
                             if av_efetiva and av_efetiva.empty:
                                 av_efetiva = None
                         except Exception:
@@ -626,7 +673,8 @@ class RestricoesCreateAPIView(APIView):
                 manuais_polys = [row.geom for row in manuais_bulk]
                 union_manuais = _union_mpolys_4674(manuais_polys)
 
-                excl_shp = _clean_union([x for x in [union_masks, av_efetiva, union_manuais] if x])
+                excl_shp = _clean_union(
+                    [x for x in [union_masks, av_efetiva, union_manuais] if x])
 
                 aoi_shp = _geos_to_shp(aoi_snapshot)
                 loteavel_shp = robust_diff_m(
@@ -636,12 +684,14 @@ class RestricoesCreateAPIView(APIView):
                     min_area_m2=0.05
                 )
 
-                loteavel = _ensure_mpoly_4674(_shp_to_geos(loteavel_shp, srid=SRID_WGS)) if loteavel_shp else None
+                loteavel = _ensure_mpoly_4674(_shp_to_geos(
+                    loteavel_shp, srid=SRID_WGS)) if loteavel_shp else None
                 r.area_loteavel = loteavel if loteavel and not loteavel.empty else None
                 r.save(update_fields=["area_loteavel"])
 
                 if r.area_loteavel:
-                    print(f"[restricoes] loteavel area_m2={_area_m2(r.area_loteavel):.2f}")
+                    print(
+                        f"[restricoes] loteavel area_m2={_area_m2(r.area_loteavel):.2f}")
             except Exception as e:
                 print(f"[restricoes] erro ao gerar area_loteavel: {e}")
 
@@ -663,6 +713,7 @@ class RestricoesCreateAPIView(APIView):
         return Response(data, status=status.HTTP_201_CREATED)
 
 # ---------- LIST ----------
+
 
 class RestricoesListByProjectAPIView(ListAPIView):
     permission_classes = [IsAuthenticated]
@@ -686,6 +737,7 @@ class RestricoesListByProjectAPIView(ListAPIView):
 
 # ---------- DETAIL ----------
 
+
 class RestricoesGeoDetailAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -693,16 +745,18 @@ class RestricoesGeoDetailAPIView(APIView):
         r = get_object_or_404(Restricoes, pk=restricoes_id)
 
         def fc(features):
-            return {"type":"FeatureCollection","features":features}
+            return {"type": "FeatureCollection", "features": features}
+
         def feat(g, props=None):
             if not g:
                 return None
             try:
-                return {"type":"Feature","geometry": json.loads(g.geojson), "properties": props or {}}
+                return {"type": "Feature", "geometry": json.loads(g.geojson), "properties": props or {}}
             except Exception:
                 return None
 
-        print(f"[restricoes.detail] GET restricoes_id={r.id} project={r.project_id} version={r.version}")
+        print(
+            f"[restricoes.detail] GET restricoes_id={r.id} project={r.project_id} version={r.version}")
         if r.aoi_snapshot:
             _debug_geom("AOI", r.aoi_snapshot)
 
@@ -713,9 +767,11 @@ class RestricoesGeoDetailAPIView(APIView):
         for row in r.ruas.all():
             try:
                 if row.eixo:
-                    rua_eixo_feats.append({"type":"Feature","geometry": json.loads(row.eixo.geojson),"properties":{"width_m": float(row.largura_m)}})
+                    rua_eixo_feats.append({"type": "Feature", "geometry": json.loads(
+                        row.eixo.geojson), "properties": {"width_m": float(row.largura_m)}})
                 if getattr(row, "mask", None):
-                    rua_mask_feats.append(feat(row.mask, {"width_m": float(row.largura_m)}))
+                    rua_mask_feats.append(
+                        feat(row.mask, {"width_m": float(row.largura_m)}))
             except Exception:
                 pass
 
@@ -723,9 +779,11 @@ class RestricoesGeoDetailAPIView(APIView):
         for row in r.margens_rio.all():
             try:
                 if row.centerline:
-                    rios_centerline_feats.append({"type":"Feature","geometry": json.loads(row.centerline.geojson),"properties":{"margem_m": float(row.margem_m)}})
+                    rios_centerline_feats.append({"type": "Feature", "geometry": json.loads(
+                        row.centerline.geojson), "properties": {"margem_m": float(row.margem_m)}})
                 if row.faixa:
-                    rios_faixa_feats.append(feat(row.faixa, {"margem_m": float(row.margem_m)}))
+                    rios_faixa_feats.append(
+                        feat(row.faixa, {"margem_m": float(row.margem_m)}))
             except Exception:
                 pass
 
@@ -733,9 +791,11 @@ class RestricoesGeoDetailAPIView(APIView):
         for row in r.margens_lt.all():
             try:
                 if row.centerline:
-                    lt_centerline_feats.append({"type":"Feature","geometry": json.loads(row.centerline.geojson),"properties":{"margem_m": float(row.margem_m)}})
+                    lt_centerline_feats.append({"type": "Feature", "geometry": json.loads(
+                        row.centerline.geojson), "properties": {"margem_m": float(row.margem_m)}})
                 if row.faixa:
-                    lt_faixa_feats.append(feat(row.faixa, {"margem_m": float(row.margem_m)}))
+                    lt_faixa_feats.append(
+                        feat(row.faixa, {"margem_m": float(row.margem_m)}))
             except Exception:
                 pass
 
@@ -743,9 +803,11 @@ class RestricoesGeoDetailAPIView(APIView):
         for row in r.margens_ferrovia.all():
             try:
                 if row.centerline:
-                    fer_centerline_feats.append({"type":"Feature","geometry": json.loads(row.centerline.geojson),"properties":{"margem_m": float(row.margem_m)}})
+                    fer_centerline_feats.append({"type": "Feature", "geometry": json.loads(
+                        row.centerline.geojson), "properties": {"margem_m": float(row.margem_m)}})
                 if row.faixa:
-                    fer_faixa_feats.append(feat(row.faixa, {"margem_m": float(row.margem_m)}))
+                    fer_faixa_feats.append(
+                        feat(row.faixa, {"margem_m": float(row.margem_m)}))
             except Exception:
                 pass
 
@@ -754,7 +816,7 @@ class RestricoesGeoDetailAPIView(APIView):
         for row in r.restricoes_manuais.all():
             try:
                 manuais_feats.append({
-                    "type":"Feature",
+                    "type": "Feature",
                     "geometry": json.loads(row.geom.geojson),
                     "properties": {"name": row.name or ""},
                 })
@@ -762,11 +824,11 @@ class RestricoesGeoDetailAPIView(APIView):
                 pass
 
         loteavel_geom = getattr(r, "area_loteavel", None)
-        loteavel_fc = {"type":"FeatureCollection","features":[]}
+        loteavel_fc = {"type": "FeatureCollection", "features": []}
         if loteavel_geom and not loteavel_geom.empty:
             try:
                 loteavel_fc["features"].append({
-                    "type":"Feature",
+                    "type": "Feature",
                     "geometry": json.loads(loteavel_geom.geojson),
                     "properties": {"area_m2": round(_area_m2(loteavel_geom), 2)},
                 })
@@ -804,3 +866,40 @@ class RestricoesGeoDetailAPIView(APIView):
             "area_loteavel": loteavel_fc,
         }
         return Response(data, status=status.HTTP_200_OK)
+
+
+class RestricoesListByDonoAPIView(ListAPIView):
+    """
+    Lista TODAS as versões de restrições de TODOS os projetos
+    pertencentes ao mesmo 'dono' (tenant) do usuário logado.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = RestricoesSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+
+        # Descobre o DONO (tenant):
+        # - se o user é 'dono', ele mesmo
+        # - se é funcionário (adm/comum), usa user.dono
+        dono = user
+        role = getattr(user, "role", None)
+        if role != "dono":
+            dono_rel = getattr(user, "dono", None)
+            if dono_rel is not None:
+                dono = dono_rel
+
+        return (
+            Restricoes.objects
+            .filter(project__dono=dono)
+            .select_related("project", "created_by")
+            .annotate(
+                areas_verdes_count=djmodels.Count("areas_verdes"),
+                cortes_av_count=djmodels.Count("cortes_av"),
+                margens_rio_count=djmodels.Count("margens_rio"),
+                margens_lt_count=djmodels.Count("margens_lt"),
+                margens_ferrovia_count=djmodels.Count("margens_ferrovia"),
+                ruas_count=djmodels.Count("ruas"),
+            )
+            .order_by("-created_at")
+        )
