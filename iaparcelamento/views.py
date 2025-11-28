@@ -172,6 +172,7 @@ CONTRATO DO CAMPO "observacoes_urbanisticas"
   - porque escolheu larguras de vias,
   - como a praça foi planejada (quando existir),
   - outras recomendações urbanísticas.
+  - resuma o máximo que puder.
 - Não coloque JSON aqui, é texto livre.
 
 -------------------------

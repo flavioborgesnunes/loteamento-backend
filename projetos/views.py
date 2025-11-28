@@ -3,9 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Set
 
-from django.utils.timezone import now
-
-
 from django.contrib.gis.db.models import GeometryField
 from django.contrib.gis.db.models.functions import Intersection, MakeValid
 from django.contrib.gis.geos import GEOSGeometry, MultiPolygon, WKBWriter
@@ -14,6 +11,7 @@ from django.db import connection, transaction
 from django.db.models import F, Func, Value
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils.timezone import now
 from geodata.models import (Area, Cidade, LimiteFederal, LinhaTransmissao,
                             MalhaFerroviaria)
 from rest_framework import status
@@ -30,13 +28,15 @@ from .utils import build_kmz_from_payload
 # Helpers
 # ------------------------------------------------------------------------------
 
+
 def _force2d_now(g):
     """Força 2D AGORA (independente do que veio antes)."""
     if not g:
         return g
     try:
         if getattr(g, "hasz", False):
-            w = WKBWriter(); w.outdim = 2
+            w = WKBWriter()
+            w.outdim = 2
             return GEOSGeometry(w.write(g), srid=g.srid or 4326)
     except Exception:
         return GEOSGeometry(g.wkt, srid=g.srid or 4326)
@@ -48,11 +48,13 @@ def _geos_force2d(g: Optional[GEOSGeometry]) -> Optional[GEOSGeometry]:
         return g
     try:
         if getattr(g, "hasz", False):
-            w = WKBWriter(); w.outdim = 2
+            w = WKBWriter()
+            w.outdim = 2
             return GEOSGeometry(w.write(g), srid=g.srid or 4326)
     except Exception:
         return GEOSGeometry(g.wkt, srid=g.srid or 4326)
     return g
+
 
 def _yield_ids_in_batches(qs_ids, batch_size=2000):
     batch = []
@@ -63,7 +65,6 @@ def _yield_ids_in_batches(qs_ids, batch_size=2000):
             batch = []
     if batch:
         yield batch
-
 
 
 def _same_tenant_or_owner(user, project: Project) -> bool:
@@ -77,13 +78,16 @@ def _same_tenant_or_owner(user, project: Project) -> bool:
         return project.owner_id == getattr(user, "id", None)
     except Exception:
         return project.owner_id == getattr(user, "id", None)
-    
+
+
 def _ensure_mp(g: GEOSGeometry) -> GEOSGeometry:
     if g.geom_type == "Polygon":
         return MultiPolygon([g], srid=g.srid or 4326)
     if g.geom_type == "MultiPolygon":
         return g
-    raise TypeError(f"AOI deve ser Polygon ou MultiPolygon; veio {g.geom_type}")
+    raise TypeError(
+        f"AOI deve ser Polygon ou MultiPolygon; veio {g.geom_type}")
+
 
 def _force2d_all_geom_fields(instance):
     for f in instance._meta.get_fields():
@@ -93,8 +97,10 @@ def _force2d_all_geom_fields(instance):
             val = getattr(instance, name, None)
             if val is not None:
                 setattr(instance, name, _geos_force2d(val))
-                
+
 # ---------------- Lógica simples de dono ----------------
+
+
 def _resolve_dono(user):
     # Mesmo padrão que você já tinha: se for dono, ele próprio; senão, FK user.dono
     if getattr(user, "role", None) == "dono":
@@ -108,6 +114,7 @@ def _resolve_dono(user):
 # ------------------------------------------------------------------------------
 # LISTA/EDITA/EXCLUI
 # ------------------------------------------------------------------------------
+
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -247,7 +254,8 @@ def exportar_projeto(request):
     user = request.user
 
     # -------- Entrada principal --------
-    aoi: MultiPolygon = v["aoi"]                      # já vem normalizado pelo serializer
+    # já vem normalizado pelo serializer
+    aoi: MultiPolygon = v["aoi"]
     simplify = v.get("simplify") or {}
     out_format = (v.get("format") or "kmz").lower()
     replace_overlays = bool(v.get("replace_overlays", False))
@@ -256,12 +264,14 @@ def exportar_projeto(request):
     name = (v.get("project_name") or v.get("name") or "").strip() or "Projeto"
     description = v.get("project_description", v.get("description", "")) or ""
     uf = v.get("uf") or None
+    municipio = (v.get("municipio") or "").strip() or None
 
     # ⚠️ Aceitar ambas: "layers" (novo front) OU "layer_flags" (antigo)
     layers = (v.get("layers") or v.get("layer_flags") or {}) or {}
 
     # Dono/owner
-    dono_user = user if getattr(user, "role", None) == "dono" else getattr(user, "dono", None) or user
+    dono_user = user if getattr(user, "role", None) == "dono" else getattr(
+        user, "dono", None) or user
     created = False
 
     # ---------- Helpers locais ----------
@@ -307,42 +317,53 @@ def exportar_projeto(request):
 
     def _geos_from_json_2d(geom_obj: Any) -> GEOSGeometry:
         """GEOS em 4326 e 2D (remove Z implicitamente)."""
-        g = GEOSGeometry(json.dumps(geom_obj) if isinstance(geom_obj, (dict, list)) else str(geom_obj))
+        g = GEOSGeometry(json.dumps(geom_obj) if isinstance(
+            geom_obj, (dict, list)) else str(geom_obj))
         if g.srid in (None, 0):
             g.srid = 4326
         elif g.srid != 4326:
-            try: g.transform(4326)
-            except Exception: pass
+            try:
+                g.transform(4326)
+            except Exception:
+                pass
         # “achata” para 2D se veio com Z
         try:
             if getattr(g, "hasz", False):
                 from django.contrib.gis.geos import WKBWriter
-                w = WKBWriter(); w.outdim = 2
+                w = WKBWriter()
+                w.outdim = 2
                 g = GEOSGeometry(w.write(g), srid=g.srid or 4326)
         except Exception:
             g = GEOSGeometry(g.wkt, srid=g.srid or 4326)
         if not g.valid:
-            try: g = g.buffer(0)
-            except Exception: pass
+            try:
+                g = g.buffer(0)
+            except Exception:
+                pass
         return g
 
     # ---------- UPSERT projeto ----------
     with transaction.atomic():
         if project_id:
-            proj = get_object_or_404(Project.objects.select_for_update(), pk=project_id)
+            proj = get_object_or_404(
+                Project.objects.select_for_update(), pk=project_id)
             if not _same_tenant_or_owner(user, proj):
                 return Response({"detail": "Sem permissão."}, status=403)
             proj.name = name
             proj.description = description
             proj.uf = uf
+            proj.municipio = municipio
         else:
-            found = Project.objects.select_for_update().filter(dono=dono_user, name=name).first()
+            found = Project.objects.select_for_update().filter(
+                dono=dono_user, name=name).first()
             if found:
                 proj = found
                 proj.description = description
                 proj.uf = uf
+                proj.municipio = municipio
             else:
-                proj = Project(name=name, description=description, uf=uf, owner=user, dono=dono_user)
+                proj = Project(name=name, description=description, municipio=municipio,
+                               uf=uf, owner=user, dono=dono_user)
                 created = True
 
         # AOI 2D (o serializer já entrega MultiPolygon/4326, mas blindamos o Z)
@@ -352,11 +373,14 @@ def exportar_projeto(request):
         proj.save()
 
         # ---------- Overlays do payload ----------
-        src_fc = v.get("overlays_raw") or v.get("overlays") or {"type": "FeatureCollection", "features": []}
+        src_fc = v.get("overlays_raw") or v.get("overlays") or {
+            "type": "FeatureCollection", "features": []}
         feats = list(_iter_features(src_fc))
 
-        tol_lines = float(simplify.get("lines", simplify.get("lt", simplify.get("rios", 0.00002))) or 0.00002)
-        tol_polys = float(simplify.get("polygons", simplify.get("polygon", 0.00005)) or 0.00005)
+        tol_lines = float(simplify.get("lines", simplify.get(
+            "lt", simplify.get("rios", 0.00002))) or 0.00002)
+        tol_polys = float(simplify.get(
+            "polygons", simplify.get("polygon", 0.00005)) or 0.00005)
 
         to_create = []
         overlays_used: Set[str] = set()
@@ -369,7 +393,8 @@ def exportar_projeto(request):
                 continue
             total_in += 1
             props = (f.get("properties") or {}).copy()
-            overlay_id = props.pop("__overlay_id", props.get("overlay_id") or props.get("name") or "overlay")
+            overlay_id = props.pop("__overlay_id", props.get(
+                "overlay_id") or props.get("name") or "overlay")
             color = props.pop("__color", None)
 
             g = _geos_from_json_2d(geom)
@@ -399,7 +424,8 @@ def exportar_projeto(request):
             overlays_touched.add(str(overlay_id))
 
         if replace_overlays and overlays_touched:
-            ProjectFeature.objects.filter(project=proj, overlay_id__in=list(overlays_touched)).delete()
+            ProjectFeature.objects.filter(
+                project=proj, overlay_id__in=list(overlays_touched)).delete()
         if to_create:
             ProjectFeature.objects.bulk_create(to_create, batch_size=1000)
 
@@ -414,7 +440,7 @@ def exportar_projeto(request):
             for batch in _yield_ids_in_batches(ids, batch_size=2000):
                 qs = (Model.objects.filter(id__in=batch)
                       .annotate(clipped=Intersection("geom", Value(proj.aoi_geom,
-                                                                  output_field=GeometryField(srid=4326)))))
+                                                                   output_field=GeometryField(srid=4326)))))
                 # Força 2D ANTES de MakeValid/Simplify
                 qs = qs.annotate(clipped2d=_force2d_sql(F("clipped")))
                 qs = qs.annotate(geom_valid=MakeValid(F("clipped2d"))).annotate(
@@ -422,7 +448,8 @@ def exportar_projeto(request):
                                     function="ST_SimplifyPreserveTopology",
                                     output_field=GeometryField(srid=4326)))
                 for row in qs.only("id"):
-                    g = getattr(row, "geom_simpl", None) or getattr(row, "geom_valid", None)
+                    g = getattr(row, "geom_simpl", None) or getattr(
+                        row, "geom_valid", None)
                     if g and not g.empty:
                         base_creates.append(ProjectFeature(
                             project=proj,
@@ -441,7 +468,7 @@ def exportar_projeto(request):
             for batch in _yield_ids_in_batches(ids, batch_size=1000):
                 qs = (Model.objects.filter(id__in=batch)
                       .annotate(clipped=Intersection("geom", Value(proj.aoi_geom,
-                                                                  output_field=GeometryField(srid=4326)))))
+                                                                   output_field=GeometryField(srid=4326)))))
                 # Força 2D ANTES de MakeValid/Simplify
                 qs = qs.annotate(clipped2d=_force2d_sql(F("clipped")))
                 qs = qs.annotate(geom_valid=MakeValid(F("clipped2d"))).annotate(
@@ -449,7 +476,8 @@ def exportar_projeto(request):
                                     function="ST_SimplifyPreserveTopology",
                                     output_field=GeometryField(srid=4326)))
                 for row in qs.only("id"):
-                    g = getattr(row, "geom_simpl", None) or getattr(row, "geom_valid", None)
+                    g = getattr(row, "geom_simpl", None) or getattr(
+                        row, "geom_valid", None)
                     if g and not g.empty:
                         base_creates.append(ProjectFeature(
                             project=proj,

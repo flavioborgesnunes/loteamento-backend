@@ -42,7 +42,7 @@ class ProjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = Project
         fields = [
-            "id", "name", "description", "uf",
+            "id", "name", "description", "uf", "municipio",
             "owner", "owner_nome", "owner_email",
             "dono",  "dono_nome",  "dono_email",
             "created_at", "updated_at",
@@ -66,6 +66,8 @@ class ProjectUpsertExportSerializer(serializers.Serializer):
     project_description = serializers.CharField(
         required=False, allow_blank=True, default="")
     uf = serializers.CharField(required=False, allow_blank=True, default="")
+    municipio = serializers.CharField(
+        required=False, allow_blank=True, default="")
 
     # Dados do mapa
     aoi = serializers.JSONField()

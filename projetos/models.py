@@ -23,6 +23,8 @@ class Project(models.Model):
     )
 
     uf = models.CharField(max_length=2, blank=True, null=True)
+
+    municipio = models.CharField(max_length=150, blank=True, null=True)
     aoi_geom = gis.MultiPolygonField(srid=4326, null=True, blank=True)
     layer_flags = models.JSONField(
         default=dict, blank=True)  # ex.: {"rios":true, ...}
