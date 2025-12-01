@@ -80,6 +80,7 @@ class ProjectUpsertExportSerializer(serializers.Serializer):
     simplify = serializers.JSONField(required=False, default=dict)
     overlays_raw = serializers.JSONField(required=False, default=dict)
     overlays = serializers.JSONField(required=False, default=dict)
+    persist = serializers.BooleanField(required=False, default=True)
 
     # Opções
     format = serializers.ChoiceField(

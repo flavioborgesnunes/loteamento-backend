@@ -30,6 +30,3 @@ class IsOwnerOrDonoOrReadOnly(BasePermission):
             return True
 
         return False
-
-        return False
-        return False

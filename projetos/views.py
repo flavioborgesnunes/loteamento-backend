@@ -139,15 +139,25 @@ def list_projects(request):
     return Response(serializer.data)
 
 
-@api_view(["PATCH", "DELETE"])
+@api_view(["GET", "PATCH", "DELETE"])
 @permission_classes([IsAuthenticated])
 def update_delete_project(request, pk: int):
     proj = get_object_or_404(Project, pk=pk)
+
+    # GET: qualquer usuário autenticado pode VER (igual você já faz em outros endpoints)
+    if request.method == "GET":
+        ser = ProjectSerializer(proj)
+        return Response(ser.data)
+
+    # PATCH/DELETE: precisa ter permissão de edição
     if not _same_tenant_or_owner(request.user, proj):
         return Response({"detail": "Sem permissão."}, status=403)
+
     if request.method == "DELETE":
         proj.delete()
         return Response(status=204)
+
+    # PATCH
     ser = ProjectSerializer(proj, data=request.data, partial=True)
     if ser.is_valid():
         ser.save()
@@ -174,6 +184,9 @@ def project_map_summary(request, pk: int):
     return Response({
         "id": proj.id,
         "name": proj.name,
+        "description": proj.description,
+        "uf": proj.uf,
+        "municipio": proj.municipio,
         "aoi": json.loads(proj.aoi_geom.geojson) if proj.aoi_geom else None,
         "layer_flags": proj.layer_flags or {},
         "overlays": overlays,
@@ -253,9 +266,11 @@ def project_overlay_delete(request, pk: int):
 @permission_classes([IsAuthenticated])
 def exportar_projeto(request):
     """
-    Se 'project_id' vier -> usa esse projeto.
-    Caso contrário -> UPSERT por (dono, project_name).
-    Salva AOI, flags, overlays e camadas base.
+    Exporta KML/KMZ com base na AOI + camadas.
+
+    Comportamento controlado por 'persist':
+    - persist=True  -> salva/atualiza Project, ProjectFeature, camadas base, artifact, snapshot.
+    - persist=False -> NÃO salva nada no banco (usa transação com rollback), só gera o arquivo.
     """
     s = ProjectUpsertExportSerializer(data=request.data or {})
     if not s.is_valid():
@@ -264,8 +279,10 @@ def exportar_projeto(request):
 
     user = request.user
 
+    # -------- Flags principais --------
+    persist = v.get("persist", True)  # <- controla salvar x só exportar
+
     # -------- Entrada principal --------
-    # já vem normalizado pelo serializer
     aoi: MultiPolygon = v["aoi"]
     simplify = v.get("simplify") or {}
     out_format = (v.get("format") or "kmz").lower()
@@ -277,12 +294,13 @@ def exportar_projeto(request):
     uf = v.get("uf") or None
     municipio = (v.get("municipio") or "").strip() or None
 
-    # ⚠️ Aceitar ambas: "layers" (novo front) OU "layer_flags" (antigo)
+    # Aceita "layers" (novo) ou "layer_flags" (legado)
     layers = (v.get("layers") or v.get("layer_flags") or {}) or {}
 
     # Dono/owner
     dono_user = user if getattr(user, "role", None) == "dono" else getattr(
-        user, "dono", None) or user
+        user, "dono", None
+    ) or user
     created = False
 
     # ---------- Helpers locais ----------
@@ -329,7 +347,8 @@ def exportar_projeto(request):
     def _geos_from_json_2d(geom_obj: Any) -> GEOSGeometry:
         """GEOS em 4326 e 2D (remove Z implicitamente)."""
         g = GEOSGeometry(json.dumps(geom_obj) if isinstance(
-            geom_obj, (dict, list)) else str(geom_obj))
+            geom_obj, (dict, list)) else str(geom_obj)
+        )
         if g.srid in (None, 0):
             g.srid = 4326
         elif g.srid != 4326:
@@ -353,50 +372,86 @@ def exportar_projeto(request):
                 pass
         return g
 
-    # ---------- UPSERT projeto ----------
+    # ---------- Variáveis que serão usadas fora da transação ----------
+    km_bytes = None
+    filename = None
+    content_type = None
+    overlays_used: Set[str] = set()
+    feats = []
+    total_clip = 0
+
+    # ---------- UPSERT projeto + features + KML/KMZ ----------
     with transaction.atomic():
+        # --- UPSERT Project ---
         if project_id:
             proj = get_object_or_404(
-                Project.objects.select_for_update(), pk=project_id)
+                Project.objects.select_for_update(), pk=project_id
+            )
             if not _same_tenant_or_owner(user, proj):
                 return Response({"detail": "Sem permissão."}, status=403)
-            proj.name = name
-            proj.description = description
-            proj.uf = uf
-            proj.municipio = municipio
-        else:
-            found = Project.objects.select_for_update().filter(
-                dono=dono_user, name=name).first()
-            if found:
-                proj = found
+            # Atualiza metadados apenas se estiver persistindo
+            if persist:
+                proj.name = name
                 proj.description = description
                 proj.uf = uf
                 proj.municipio = municipio
+        else:
+            found = Project.objects.select_for_update().filter(
+                dono=dono_user, name=name
+            ).first()
+            if found:
+                proj = found
+                if persist:
+                    proj.description = description
+                    proj.uf = uf
+                    proj.municipio = municipio
             else:
-                proj = Project(name=name, description=description, municipio=municipio,
-                               uf=uf, owner=user, dono=dono_user)
+                # Mesmo com persist=False, criamos um Project “temporário” só
+                # para servir de contexto; o rollback depois apaga.
+                proj = Project(
+                    name=name,
+                    description=description,
+                    municipio=municipio,
+                    uf=uf,
+                    owner=user,
+                    dono=dono_user,
+                )
+                proj.save()
                 created = True
 
-        # AOI 2D (o serializer já entrega MultiPolygon/4326, mas blindamos o Z)
+        # AOI 2D (sempre, para o KMZ)
         proj.aoi_geom = _geos_from_json_2d(json.loads(aoi.geojson))
+
+        # layer_flags ficam apenas em memória se persist=False;
+        # se persist=True, acabam salvos em banco.
         if layers:
             proj.layer_flags = layers
-        proj.save()
+
+        if persist:
+            proj.save()
 
         # ---------- Overlays do payload ----------
         src_fc = v.get("overlays_raw") or v.get("overlays") or {
-            "type": "FeatureCollection", "features": []}
+            "type": "FeatureCollection",
+            "features": [],
+        }
         feats = list(_iter_features(src_fc))
 
-        tol_lines = float(simplify.get("lines", simplify.get(
-            "lt", simplify.get("rios", 0.00002))) or 0.00002)
-        tol_polys = float(simplify.get(
-            "polygons", simplify.get("polygon", 0.00005)) or 0.00005)
+        tol_lines = float(
+            simplify.get("lines", simplify.get(
+                "lt", simplify.get("rios", 0.00002)))
+            or 0.00002
+        )
+        if "polygons" in simplify:
+            tol_polys = float(simplify["polygons"])  # pode ser 0
+        else:
+            tol_polys = float(simplify.get("polygon", 0.00005))
 
         to_create = []
-        overlays_used: Set[str] = set()
+        overlays_used = set()
         overlays_touched: Set[str] = set()
-        total_in = total_clip = 0
+        total_in = 0
+        total_clip = 0
 
         for f in feats:
             geom = f.get("geometry")
@@ -404,8 +459,10 @@ def exportar_projeto(request):
                 continue
             total_in += 1
             props = (f.get("properties") or {}).copy()
-            overlay_id = props.pop("__overlay_id", props.get(
-                "overlay_id") or props.get("name") or "overlay")
+            overlay_id = props.pop(
+                "__overlay_id",
+                props.get("overlay_id") or props.get("name") or "overlay",
+            )
             color = props.pop("__color", None)
 
             g = _geos_from_json_2d(geom)
@@ -415,61 +472,87 @@ def exportar_projeto(request):
             total_clip += 1
 
             try:
-                if inter.geom_type in ("LineString", "MultiLineString", "GeometryCollection"):
+                if inter.geom_type in (
+                    "LineString",
+                    "MultiLineString",
+                    "GeometryCollection",
+                ):
                     g_simpl = inter.simplify(tol_lines, preserve_topology=True)
                 else:
                     g_simpl = inter.simplify(tol_polys, preserve_topology=True)
             except Exception:
                 g_simpl = inter
 
-            to_create.append(ProjectFeature(
-                project=proj,
-                overlay_id=str(overlay_id)[:200],
-                properties=props,
-                color=(str(color)[:16] if color else None),
-                geom=inter,
-                geom_simpl=g_simpl,
-                created_by=user,
-            ))
+            to_create.append(
+                ProjectFeature(
+                    project=proj,
+                    overlay_id=str(overlay_id)[:200],
+                    properties=props,
+                    color=(str(color)[:16] if color else None),
+                    geom=inter,
+                    geom_simpl=g_simpl,
+                    created_by=user,
+                )
+            )
             overlays_used.add(str(overlay_id))
             overlays_touched.add(str(overlay_id))
 
-        if replace_overlays and overlays_touched:
-            ProjectFeature.objects.filter(
-                project=proj, overlay_id__in=list(overlays_touched)).delete()
-        if to_create:
-            ProjectFeature.objects.bulk_create(to_create, batch_size=1000)
+        if persist:
+            if replace_overlays and overlays_touched:
+                ProjectFeature.objects.filter(
+                    project=proj, overlay_id__in=list(overlays_touched)
+                ).delete()
+            if to_create:
+                ProjectFeature.objects.bulk_create(to_create, batch_size=1000)
 
         # ---------- Camadas base (rios, LT, etc.) ----------
         base_creates = []
 
         def _save_lines(Model, overlay_name: str):
-            ids = (Model.objects
-                   .filter(geom__intersects=proj.aoi_geom)
-                   .order_by("id")
-                   .values_list("id", flat=True))
+            ids = (
+                Model.objects.filter(geom__intersects=proj.aoi_geom)
+                .order_by("id")
+                .values_list("id", flat=True)
+            )
             for batch in _yield_ids_in_batches(ids, batch_size=2000):
-                qs = (Model.objects.filter(id__in=batch)
-                      .annotate(clipped=Intersection("geom", Value(proj.aoi_geom,
-                                                                   output_field=GeometryField(srid=4326)))))
+                qs = (
+                    Model.objects.filter(id__in=batch)
+                    .annotate(
+                        clipped=Intersection(
+                            "geom",
+                            Value(
+                                proj.aoi_geom,
+                                output_field=GeometryField(srid=4326),
+                            ),
+                        )
+                    )
+                )
                 # Força 2D ANTES de MakeValid/Simplify
                 qs = qs.annotate(clipped2d=_force2d_sql(F("clipped")))
                 qs = qs.annotate(geom_valid=MakeValid(F("clipped2d"))).annotate(
-                    geom_simpl=Func(F("geom_valid"), Value(float(tol_lines)),
-                                    function="ST_SimplifyPreserveTopology",
-                                    output_field=GeometryField(srid=4326)))
+                    geom_simpl=Func(
+                        F("geom_valid"),
+                        Value(float(tol_lines)),
+                        function="ST_SimplifyPreserveTopology",
+                        output_field=GeometryField(srid=4326),
+                    )
+                )
                 for row in qs.only("id"):
                     g = getattr(row, "geom_simpl", None) or getattr(
-                        row, "geom_valid", None)
+                        row, "geom_valid", None
+                    )
                     if g and not g.empty:
-                        base_creates.append(ProjectFeature(
-                            project=proj,
-                            overlay_id=overlay_name,
-                            properties={},
-                            color=None,
-                            geom=g, geom_simpl=g,
-                            created_by=user,
-                        ))
+                        base_creates.append(
+                            ProjectFeature(
+                                project=proj,
+                                overlay_id=overlay_name,
+                                properties={},
+                                color=None,
+                                geom=g,
+                                geom_simpl=g,
+                                created_by=user,
+                            )
+                        )
 
         def _save_polys(Model, overlay_name: str, extra_filter=None):
             base = Model.objects.filter(geom__intersects=proj.aoi_geom)
@@ -477,78 +560,113 @@ def exportar_projeto(request):
                 base = base.filter(**extra_filter)
             ids = base.order_by("id").values_list("id", flat=True)
             for batch in _yield_ids_in_batches(ids, batch_size=1000):
-                qs = (Model.objects.filter(id__in=batch)
-                      .annotate(clipped=Intersection("geom", Value(proj.aoi_geom,
-                                                                   output_field=GeometryField(srid=4326)))))
+                qs = (
+                    Model.objects.filter(id__in=batch)
+                    .annotate(
+                        clipped=Intersection(
+                            "geom",
+                            Value(
+                                proj.aoi_geom,
+                                output_field=GeometryField(srid=4326),
+                            ),
+                        )
+                    )
+                )
                 # Força 2D ANTES de MakeValid/Simplify
                 qs = qs.annotate(clipped2d=_force2d_sql(F("clipped")))
                 qs = qs.annotate(geom_valid=MakeValid(F("clipped2d"))).annotate(
-                    geom_simpl=Func(F("geom_valid"), Value(float(tol_polys)),
-                                    function="ST_SimplifyPreserveTopology",
-                                    output_field=GeometryField(srid=4326)))
+                    geom_simpl=Func(
+                        F("geom_valid"),
+                        Value(float(tol_polys)),
+                        function="ST_SimplifyPreserveTopology",
+                        output_field=GeometryField(srid=4326),
+                    )
+                )
                 for row in qs.only("id"):
                     g = getattr(row, "geom_simpl", None) or getattr(
-                        row, "geom_valid", None)
+                        row, "geom_valid", None
+                    )
                     if g and not g.empty:
-                        base_creates.append(ProjectFeature(
-                            project=proj,
-                            overlay_id=overlay_name,
-                            properties={},
-                            color=None,
-                            geom=g, geom_simpl=g,
-                            created_by=user,
-                        ))
+                        base_creates.append(
+                            ProjectFeature(
+                                project=proj,
+                                overlay_id=overlay_name,
+                                properties={},
+                                color=None,
+                                geom=g,
+                                geom_simpl=g,
+                                created_by=user,
+                            )
+                        )
 
-        if layers.get("rios"):
-            _save_lines(Waterway, "Rios")
-        if layers.get("lt"):
-            _save_lines(LinhaTransmissao, "Linhas de Transmissão")
-        if layers.get("mf"):
-            _save_lines(MalhaFerroviaria, "Ferrovias")
-        if layers.get("cidades"):
-            _save_polys(Cidade, "Municípios")
-        if layers.get("limites_federais"):
-            _save_polys(LimiteFederal, "Áreas Federais")
-        if layers.get("areas_estaduais"):
-            extra = {"uf": proj.uf} if proj.uf else None
-            _save_polys(Area, "Áreas Estaduais", extra_filter=extra)
+        if persist:
+            if layers.get("rios"):
+                _save_lines(Waterway, "Rios")
+            if layers.get("lt"):
+                _save_lines(LinhaTransmissao, "Linhas de Transmissão")
+            if layers.get("mf"):
+                _save_lines(MalhaFerroviaria, "Ferrovias")
+            if layers.get("cidades"):
+                _save_polys(Cidade, "Municípios")
+            if layers.get("limites_federais"):
+                _save_polys(LimiteFederal, "Áreas Federais")
+            if layers.get("areas_estaduais"):
+                extra = {"uf": proj.uf} if proj.uf else None
+                _save_polys(Area, "Áreas Estaduais", extra_filter=extra)
 
-        if base_creates:
-            ProjectFeature.objects.bulk_create(base_creates, batch_size=1000)
+            if base_creates:
+                ProjectFeature.objects.bulk_create(
+                    base_creates, batch_size=1000)
 
-    # ---------- Gera KML/KMZ ----------
-    km_bytes, filename, content_type = build_kmz_from_payload(
-        project=proj,
-        aoi_geojson=json.loads(proj.aoi_geom.geojson),
-        layer_flags=proj.layer_flags or {},
-        simplify=simplify,
-        include_saved_overlays=True,
-        out_format=out_format,
-    )
-
-    # ---------- Artefato + snapshot ----------
-    try:
-        artifact = MapArtifact.objects.create(
-            project=proj, kind="export",
-            content_type=content_type, size_bytes=len(km_bytes),
-            meta={"filename": filename},
-        )
-        artifact.file.save(filename, ContentFile(km_bytes), save=True)
-        ExportSnapshot.objects.create(
-            project=proj, artifact=artifact,
-            aoi_geom=proj.aoi_geom,
+        # ---------- Gera KML/KMZ ainda DENTRO da transação ----------
+        km_bytes, filename, content_type = build_kmz_from_payload(
+            project=proj,
+            aoi_geojson=json.loads(proj.aoi_geom.geojson),
             layer_flags=proj.layer_flags or {},
-            overlays_used=sorted(overlays_used),
-            created_by=user,
+            simplify=simplify,
+            include_saved_overlays=True,
+            out_format=out_format,
         )
-    except Exception:
-        pass
+
+        # Se NÃO for pra persistir, marcamos rollback:
+        # nada do que fizemos no banco é realmente gravado.
+        if not persist:
+            transaction.set_rollback(True)
+
+    # ---------- Artefato + snapshot (só se persist=True) ----------
+    if persist:
+        try:
+            artifact = MapArtifact.objects.create(
+                project=proj,
+                kind="export",
+                content_type=content_type,
+                size_bytes=len(km_bytes),
+                meta={"filename": filename},
+            )
+            artifact.file.save(filename, ContentFile(km_bytes), save=True)
+            ExportSnapshot.objects.create(
+                project=proj,
+                artifact=artifact,
+                aoi_geom=proj.aoi_geom,
+                layer_flags=proj.layer_flags or {},
+                overlays_used=sorted(overlays_used),
+                created_by=user,
+            )
+        except Exception:
+            pass
 
     # ---------- Resposta ----------
     resp = HttpResponse(km_bytes, content_type=content_type)
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
-    resp["X-Proj-Id"] = str(proj.id)
-    resp["X-Proj-Created"] = "1" if created else "0"
+
+    if persist:
+        resp["X-Proj-Id"] = str(proj.id)
+        resp["X-Proj-Created"] = "1" if created else "0"
+    else:
+        # Exportação “volátil”: não garante que o projeto exista após a request
+        resp["X-Proj-Id"] = ""
+        resp["X-Proj-Created"] = "0"
+
     resp["X-Overlays-Used"] = ",".join(sorted(overlays_used))
     resp["X-Features-In"] = str(len(feats))
     resp["X-Features-Clipped"] = str(total_clip)
