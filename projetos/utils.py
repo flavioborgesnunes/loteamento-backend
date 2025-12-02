@@ -538,8 +538,9 @@ def build_kmz_from_payload(
 
     # ---------- Saída ----------
     # Nome base usando o NOME DO PROJETO (slug) como preferência
-    proj_name = getattr(project, "name", "") or f"projeto-{project.id}"
-    base_slug = slugify(proj_name) or f"projeto-{project.id}"
+    # proj_name = getattr(project, "name", "") or f"projeto-{project.id}"
+    nome_proj = (project.name or "projeto").strip()
+    base_slug = slugify(nome_proj)
 
     if out_format.lower() == "kml":
         payload = kml.kml().encode("utf-8")
