@@ -88,6 +88,17 @@ urlpatterns = [
         "restricoes/todas-do-dono/",
         restricoes_views.RestricoesListByDonoAPIView.as_view(),
     ),
+    path(
+        "restricoes/<int:restricoes_id>/exportar-kmz/",
+        restricoes_views.RestricoesExportKmzAPIView.as_view(),
+        name="restricoes-exportar-kmz",
+    ),
+     
+    path(
+        "restricoes/<int:restricoes_id>/",
+        restricoes_views.RestricoesUpdateAPIView.as_view(),
+    ),
+
 
     # Parcelamento:
     # Planos

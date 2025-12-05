@@ -19,6 +19,11 @@ from rest_framework.views import APIView
 from shapely.geometry import mapping, shape
 from shapely.ops import snap, unary_union
 from shapely.validation import make_valid as shapely_make_valid
+from django.http import HttpResponse
+from projetos.utils import build_kmz_from_payload 
+
+from rest_framework import status
+from django.shortcuts import get_object_or_404
 
 from .models import ManualRestricaoV  # ---- MANUAIS
 from .models import (SRID_WGS, AreaVerdeV, CorteAreaVerdeV, MargemFerroviaV,
@@ -711,6 +716,320 @@ class RestricoesCreateAPIView(APIView):
 
         data = RestricoesSerializer(qs).data
         return Response(data, status=status.HTTP_201_CREATED)
+    
+
+class RestricoesUpdateAPIView(APIView):
+    """
+    Atualiza uma versão de restrições EXISTENTE (PUT /restricoes/<id>/).
+
+    Payload esperado: MESMO formato do create:
+    {
+        "label": "...",
+        "notes": "...",
+        "percent_permitido": ...,
+        "corte_pct_cache": ...,
+        "source": "geoman",
+        "adHoc": {
+            "aoi": {...},
+            "av": {...},
+            "corte_av": {...},
+            "ruas": {...},
+            "rios": {...},
+            "lt": {...},
+            "ferrovias": {...},
+            "manuais": {...}
+        }
+    }
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def put(self, request, restricoes_id: int, *args, **kwargs):
+        r = get_object_or_404(Restricoes, pk=restricoes_id)
+        proj = r.project  # projeto não muda
+
+        label = request.data.get("label", "") or ""
+        notes = request.data.get("notes", "") or ""
+        percent_permitido = request.data.get("percent_permitido", None)
+        corte_pct_cache = request.data.get("corte_pct_cache", None)
+        source = request.data.get("source", "geoman")
+
+        ad_hoc = request.data.get("adHoc") or {}
+        aoi_in = ad_hoc.get("aoi")
+        if not aoi_in:
+            return Response({"detail": "Campo obrigatório ausente: adHoc.aoi"},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        av_fc = ad_hoc.get("av") or {"type": "FeatureCollection", "features": []}
+        corte_fc = ad_hoc.get("corte_av") or {"type": "FeatureCollection", "features": []}
+        ruas_fc = ad_hoc.get("ruas") or {"type": "FeatureCollection", "features": []}
+        rios_fc = ad_hoc.get("rios") or {"type": "FeatureCollection", "features": []}
+        lt_fc = ad_hoc.get("lt") or {"type": "FeatureCollection", "features": []}
+        ferrovias_fc = ad_hoc.get("ferrovias") or {"type": "FeatureCollection", "features": []}
+        manuais_fc = ad_hoc.get("manuais") or {"type": "FeatureCollection", "features": []}
+
+        def_margem_rio = 30.0
+        def_margem_lt = 30.0
+        def_margem_ferrovia = 15.0
+
+        try:
+            aoi_g = _ensure_mpoly_4674(_from_geojson(aoi_in))
+        except Exception:
+            return Response({"detail": "Geometria inválida em adHoc.aoi"},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            # Atualiza campos simples
+            r.aoi_snapshot = aoi_g
+            r.label = label
+            r.notes = notes
+            r.percent_permitido = percent_permitido
+            r.corte_pct_cache = corte_pct_cache
+            r.source = source
+
+            # Limpar TODAS as geometrias antigas ligadas a esta restrição
+            AreaVerdeV.objects.filter(restricoes=r).delete()
+            CorteAreaVerdeV.objects.filter(restricoes=r).delete()
+            RuaV.objects.filter(restricoes=r).delete()
+            MargemRioV.objects.filter(restricoes=r).delete()
+            MargemLTV.objects.filter(restricoes=r).delete()
+            MargemFerroviaV.objects.filter(restricoes=r).delete()
+            ManualRestricaoV.objects.filter(restricoes=r).delete()
+
+
+            # ---------- AV ----------
+            av_bulk = []
+            for feat in _iter_fc(av_fc):
+                geom = feat.get("geometry")
+                if not geom:
+                    continue
+                try:
+                    g = _ensure_mpoly_4674(_from_geojson(geom))
+                except Exception:
+                    continue
+                av_bulk.append(AreaVerdeV(restricoes=r, geom=g))
+            if av_bulk:
+                AreaVerdeV.objects.bulk_create(av_bulk, batch_size=500)
+
+            # ---------- CORTES ----------
+            corte_bulk = []
+            for feat in _iter_fc(corte_fc):
+                geom = feat.get("geometry")
+                if not geom:
+                    continue
+                try:
+                    g = _ensure_mpoly_4674(_from_geojson(geom))
+                except Exception:
+                    continue
+                corte_bulk.append(CorteAreaVerdeV(restricoes=r, geom=g))
+            if corte_bulk:
+                CorteAreaVerdeV.objects.bulk_create(corte_bulk, batch_size=500)
+
+
+            # ---------- RUAS ----------
+            rua_bulk = []
+            for feat in _iter_fc(ruas_fc):
+                geom = feat.get("geometry")
+                if not geom:
+                    continue
+                props = feat.get("properties") or {}
+                largura_val = _get_prop(props, "width_m", 12)
+                try:
+                    largura = float(largura_val) if largura_val is not None else 12.0
+                except Exception:
+                    largura = 12.0
+                try:
+                    eixo_raw = _from_geojson(geom)
+                    eixo = _norm_line_4674(eixo_raw)
+                    if not getattr(eixo, "srid", None):
+                        eixo.srid = SRID_WGS
+                    _debug_geom("rua.eixo", eixo)
+                except Exception:
+                    continue
+
+                mask = _buffer_meters_stable_clip_aoi(eixo, largura / 2.0, aoi_g)
+                if mask:
+                    mask = _ensure_mpoly_4674(mask)
+                _debug_geom("rua.mask", mask)
+                try:
+                    rua_bulk.append(
+                        RuaV(restricoes=r, eixo=eixo, largura_m=largura, mask=mask)
+                    )
+                except TypeError:
+                    rua_bulk.append(
+                        RuaV(restricoes=r, eixo=eixo, largura_m=largura)
+                    )
+            if rua_bulk:
+                RuaV.objects.bulk_create(rua_bulk, batch_size=500)
+
+            # ---------- RIOS ----------
+            rio_bulk = []
+            for feat in _iter_fc(rios_fc):
+                geom = feat.get("geometry")
+                if not geom:
+                    continue
+                props = feat.get("properties") or {}
+                margem_val = _get_prop(props, "margem_m", def_margem_rio)
+                try:
+                    margem = float(margem_val) if margem_val is not None else float(def_margem_rio)
+                except Exception:
+                    margem = float(def_margem_rio)
+                try:
+                    line_raw = _from_geojson(geom)
+                    line = _norm_line_4674(line_raw)
+                    if not getattr(line, "srid", None):
+                        line.srid = SRID_WGS
+                except Exception:
+                    continue
+                faixa = _buffer_meters_stable_clip_aoi(line, margem, aoi_g)
+                if faixa:
+                    faixa = _ensure_mpoly_4674(faixa)
+                rio_bulk.append(
+                    MargemRioV(
+                        restricoes=r,
+                        centerline=line,
+                        margem_m=margem,
+                        faixa=faixa,
+                    )
+                )
+            if rio_bulk:
+                MargemRioV.objects.bulk_create(rio_bulk, batch_size=500)
+
+            # ---------- LT ----------
+            lt_bulk = []
+            for feat in _iter_fc(lt_fc):
+                geom = feat.get("geometry")
+                if not geom:
+                    continue
+                props = feat.get("properties") or {}
+                margem_val = _get_prop(props, "margem_m", def_margem_lt)
+                try:
+                    margem = float(margem_val) if margem_val is not None else float(def_margem_lt)
+                except Exception:
+                    margem = float(def_margem_lt)
+                try:
+                    line_raw = _from_geojson(geom)
+                    line = _norm_line_4674(line_raw)
+                    if not getattr(line, "srid", None):
+                        line.srid = SRID_WGS
+                except Exception:
+                    continue
+                faixa = _buffer_meters_stable_clip_aoi(line, margem, aoi_g)
+                if faixa:
+                    faixa = _ensure_mpoly_4674(faixa)
+                lt_bulk.append(
+                    MargemLTV(
+                        restricoes=r,
+                        centerline=line,
+                        margem_m=margem,
+                        faixa=faixa,
+                    )
+                )
+            if lt_bulk:
+                MargemLTV.objects.bulk_create(lt_bulk, batch_size=500)
+
+            # ---------- FERROVIAS ----------
+            fer_bulk = []
+            for feat in _iter_fc(ferrovias_fc):
+                geom = feat.get("geometry")
+                if not geom:
+                    continue
+                props = feat.get("properties") or {}
+                margem_val = _get_prop(props, "margem_m", def_margem_ferrovia)
+                try:
+                    margem = float(margem_val) if margem_val is not None else float(def_margem_ferrovia)
+                except Exception:
+                    margem = float(def_margem_ferrovia)
+                try:
+                    line_raw = _from_geojson(geom)
+                    line = _norm_line_4674(line_raw)
+                    if not getattr(line, "srid", None):
+                        line.srid = SRID_WGS
+                except Exception:
+                    continue
+                faixa = _buffer_meters_stable_clip_aoi(line, margem, aoi_g)
+                if faixa:
+                    faixa = _ensure_mpoly_4674(faixa)
+                fer_bulk.append(
+                    MargemFerroviaV(
+                        restricoes=r,
+                        centerline=line,
+                        margem_m=margem,
+                        faixa=faixa,
+                    )
+                )
+            if fer_bulk:
+                MargemFerroviaV.objects.bulk_create(fer_bulk, batch_size=500)
+
+            # ---------- MANUAIS ----------
+            manuais_bulk = []
+            for feat in _iter_fc(manuais_fc):
+                geom = feat.get("geometry")
+                if not geom:
+                    continue
+                props = feat.get("properties") or {}
+                nm = (props.get("name") or props.get("label") or "").strip()
+                try:
+                    g = _ensure_mpoly_4674(_from_geojson(geom))
+                except Exception:
+                    continue
+                manuais_bulk.append(ManualRestricaoV(restricoes=r, name=nm, geom=g))
+            if manuais_bulk:
+                ManualRestricaoV.objects.bulk_create(manuais_bulk, batch_size=500)
+
+            # ---------- ÁREA LOTEÁVEL ----------
+            try:
+                masks_polys = []
+                masks_polys.extend([row.mask for row in RuaV.objects.filter(restricoes=r).exclude(mask__isnull=True)])
+                masks_polys.extend([row.faixa for row in MargemRioV.objects.filter(restricoes=r).exclude(faixa__isnull=True)])
+                masks_polys.extend([row.faixa for row in MargemLTV.objects.filter(restricoes=r).exclude(faixa__isnull=True)])
+                masks_polys.extend([row.faixa for row in MargemFerroviaV.objects.filter(restricoes=r).exclude(faixa__isnull=True)])
+
+                if masks_polys:
+                    masks_gc = GeometryCollection(masks_polys, srid=aoi_g.srid)
+                    loteavel = aoi_g.difference(masks_gc)
+                else:
+                    loteavel = aoi_g.clone()
+                if loteavel and hasattr(loteavel, "empty") and not loteavel.empty:
+                    loteavel = _ensure_mpoly_4674(loteavel)
+                else:
+                    loteavel = None
+            except Exception:
+                loteavel = None
+
+            r.area_loteavel = loteavel
+            r.save(update_fields=[
+                "aoi_snapshot",
+                "label",
+                "notes",
+                "percent_permitido",
+                "corte_pct_cache",
+                "source",
+                "area_loteavel",
+            ])
+
+        return Response(
+            {
+                "id": r.id,
+                "version": r.version,
+                "label": r.label,
+                "project_id": proj.id,
+            },
+            status=status.HTTP_200_OK,
+        )
+        
+    def delete(self, request, restricoes_id):
+        """
+        Exclui completamente uma versão de restrições e suas geometrias.
+        """
+        r = get_object_or_404(
+            Restricoes,
+            pk=restricoes_id,
+            
+        )
+        r.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 # ---------- LIST ----------
 
@@ -903,3 +1222,78 @@ class RestricoesListByDonoAPIView(ListAPIView):
             )
             .order_by("-created_at")
         )
+
+class RestricoesExportKmzAPIView(APIView):
+    """
+    Exporta um KMZ de uma versão de restrições usando o mesmo builder de
+    projetos (build_kmz_from_payload), para abrir no Google Earth com
+    camadas (AOI, rios, LT, ferrovias, áreas de overlays de projeto, etc.).
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, restricoes_id: int, *args, **kwargs):
+        # Carrega a versão de restrições
+        r = get_object_or_404(Restricoes, pk=restricoes_id)
+        project = r.project
+
+        if project is None:
+            return Response(
+                {"detail": "Restrição sem projeto associado."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Escolhe a AOI a ser usada no recorte:
+        #   - se existir area_loteavel, usa ela (área efetivamente aproveitável)
+        #   - senão, cai para o snapshot completo da AOI.
+        aoi_geom = r.area_loteavel or r.aoi_snapshot
+        if not aoi_geom:
+            return Response(
+                {
+                    "detail": (
+                        "Restrição sem area_loteavel nem aoi_snapshot. "
+                        "Nada para exportar."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            # Converte a geometria da AOI (MultiPolygon 4674) em dict GeoJSON
+            aoi_geojson = json.loads(aoi_geom.geojson)
+        except Exception as e:
+            return Response(
+                {"detail": f"Erro ao converter AOI para GeoJSON: {e}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Flags de camadas do próprio projeto (mesma lógica da exportação de projetos)
+        layer_flags = getattr(project, "layer_flags", None) or {}
+
+        # Opcional: no futuro dá para ler parâmetros de simplificação da querystring
+        simplify = None
+
+        # Usa o mesmo builder central que já gera o KMZ bonito em Projetos
+        kmz_bytes, filename, mimetype = build_kmz_from_payload(
+            project=project,
+            aoi_geojson=aoi_geojson,
+            layer_flags=layer_flags,
+            simplify=simplify,
+            include_saved_overlays=True,
+            out_format="kmz",
+        )
+
+        # Ajusta o nome do arquivo para deixar claro que é uma versão de restrições
+        base_name = f"{project.name or 'projeto'}_restricoes_v{r.version}"
+        safe_name = (
+            base_name.strip()
+            .replace(" ", "_")
+            .replace("/", "_")
+            .replace("\\", "_")
+        )
+
+        response = HttpResponse(kmz_bytes, content_type=mimetype)
+        response["Content-Disposition"] = f'attachment; filename="{safe_name}.kmz"'
+        return response
+
+
+    
