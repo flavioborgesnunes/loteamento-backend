@@ -3,6 +3,7 @@ from decouple import config
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.mail import send_mail
+from django.db.models import Q
 from rest_framework import generics, permissions, serializers, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -90,3 +91,31 @@ class PasswordChangeView(generics.CreateAPIView):
             return Response({"message": "Erro ao redefinir senha."}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({"message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class UsuariosDoDonoListView(generics.ListAPIView):
+    """
+    Retorna todos os usuários do mesmo dono do usuário logado,
+    incluindo o próprio dono.
+    """
+    serializer_class = UserSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+
+        # Descobre quem é o "dono base"
+        if getattr(user, "role", None) == "dono":
+            dono_base = user
+        elif getattr(user, "dono_id", None):
+            dono_base = user.dono
+        else:
+            # sem dono vinculado → devolve só ele mesmo
+            return User.objects.filter(id=user.id)
+
+        return (
+            User.objects.filter(
+                Q(dono=dono_base) | Q(id=dono_base.id)
+            )
+            .order_by("role", "nome", "email")
+        )

@@ -57,6 +57,8 @@ urlpatterns = [
     path("user/password-reset/<email>/",
          userauths_views.PasswordResetEmailVerify.as_view()),
     path("user/password-change/", userauths_views.PasswordChangeView.as_view()),
+    path("user/usuarios-do-dono/", userauths_views.UsuariosDoDonoListView.as_view()),
+
 
     # IA
     path("autofill/", ia_views.LegalAutoFillView.as_view(), name="autofill"),
@@ -93,7 +95,7 @@ urlpatterns = [
         restricoes_views.RestricoesExportKmzAPIView.as_view(),
         name="restricoes-exportar-kmz",
     ),
-     
+
     path(
         "restricoes/<int:restricoes_id>/",
         restricoes_views.RestricoesUpdateAPIView.as_view(),
