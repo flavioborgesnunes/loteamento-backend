@@ -52,7 +52,23 @@ O campo "parametros" deve conter os parâmetros numéricos que o backend usará 
   "comprimento_max_quarteirao_m": number,
   "largura_calcada_m": number,
   "orientacao_graus": number | null
+  
+  "direcao_quarteiroes": "auto_maior_lado",
+  "lado_ref_quarteiroes": "topo",
+  "orientacao_graus": null
 }
+
+// COMO ORIENTAR OS QUARTEIRÕES:
+  // - "auto_maior_lado": back-end alinha os quarteirões ao maior lado da área loteável
+  // - "usar_orientacao_graus": back-end usa orientacao_graus explicitamente
+  "direcao_quarteiroes": "auto_maior_lado" | "usar_orientacao_graus",
+
+  // QUAL LADO SERVE DE REFERÊNCIA PARA O ÂNGULO
+  // por padrão use "topo"
+  // - "topo": acompanhar o ângulo da parte superior da AL
+  // - "base": acompanhar o lado de baixo
+  // - "esquerda" ou "direita": acompanhar as laterais
+  "lado_ref_quarteiroes": "topo" | "base" | "esquerda" | "direita"
 
 Regras:
 - Use valores em METROS.
@@ -67,6 +83,12 @@ CONTRATO DO CAMPO "comandos"
 -----------------------------
 
 O campo "comandos" é SEMPRE uma lista (array) de comandos geométricos.
+
+- "observacoes_urbanisticas" é SEMPRE uma string.
+- Seja MUITO curto. Resuma em UMA ou POUCAS frases.
+- Priorize contagens objetivas, por exemplo:
+  - "X lotes, Y quarteirões, Z ruas principais, W travessas."
+- Evite explicações longas. Não repita parâmetros óbvios.
 
 Cada comando é um objeto com o formato:
 
@@ -195,6 +217,53 @@ Resuma tudo isso gerando SEMPRE um JSON VÁLIDO com esta estrutura:
 NÃO use comentários.
 NÃO use vírgula sobrando no final.
 NÃO escreva nada fora do JSON.
+
+REGRAS IMPORTANTES DE LOTEAMENTO (NUNCA QUEBRE):
+
+1) Direção dos quarteirões
+- Por padrão use:
+    "direcao_quarteiroes": "auto_maior_lado",
+    "lado_ref_quarteiroes": "topo"
+  Ou seja: os quarteirões devem seguir o maior lado da área loteável,
+  alinhando a malha ao ângulo da parte superior (topo) do terreno.
+
+- Se o usuário pedir explicitamente outro lado ("acompanhar a parte de baixo",
+  "acompanhar a lateral direita", etc.), ajuste:
+    "lado_ref_quarteiroes": "base" | "esquerda" | "direita".
+
+- Só use "usar_orientacao_graus" quando o usuário der um ângulo numérico
+  explícito (por ex.: "quarteirões a 30° em relação ao norte").
+
+2) Não começar nem terminar com ruas (nem na vertical, nem na horizontal)
+- Nas extremidades da AL, a borda do terreno deve encostar em quarteirões, NÃO em ruas novas.
+- Nunca sugira parâmetros que forcem o back-end a iniciar ou terminar a malha com uma rua.
+- Pense sempre no padrão:
+    QUARTEIRÃO - RUA - QUARTEIRÃO - RUA - ... - QUARTEIRÃO
+  (ruas apenas entre quarteirões, nunca nas extremidades da AL).
+
+3) Ruas com largura fixa
+- As larguras de rua "larg_rua_vert_m" e "larg_rua_horiz_m" são FIXAS.
+- Você NÃO deve tentar "apertar" rua para caber: nunca reduza essas larguras para encaixar a malha.
+- Se algo precisar se ajustar, ajuste o fundo dos quarteirões/lotes, nunca a largura da rua.
+
+4) Frente mínima e fundo flexível
+- A frente mínima de lote (frente_min_m) DEVE ser respeitada: nenhum lote pode ter frente menor.
+- O fundo (profundidade) pode ser maior que prof_min_m, aumentando a área do lote.
+- O fundo pode ser menor que prof_min_m somente se a área final do lote
+  (frente x profundidade) continuar atendendo a área de referência
+  (frente_min_m x prof_min_m).
+- Em resumo:
+  - frente >= frente_min_m SEMPRE;
+  - área_lote >= frente_min_m * prof_min_m;
+  - o fundo é o elemento mais flexível para encaixar na geometria da AL.
+
+5) Início e fim da AL com quarteirões
+- Ao distribuir quarteirões ao longo da direção principal, garanta que:
+  - exista quarteirão no início da AL;
+  - exista quarteirão no fim da AL;
+  - as frentes/lotes médios podem ser ligeiramente ajustados para acomodar sobras de medida.
+
+
 """
 
 
@@ -208,7 +277,6 @@ client = OpenAI(api_key=settings.OPENAI_API_KEY)
 # ---------------------------------------------------------------------------
 # Helpers de parâmetros
 # ---------------------------------------------------------------------------
-
 def _merge_plan_params(plano: ParcelamentoPlano, params_iniciais: Dict[str, Any] | None) -> Dict[str, Any]:
     """
     Junta os parâmetros do plano com overrides opcionais do front.
@@ -217,6 +285,7 @@ def _merge_plan_params(plano: ParcelamentoPlano, params_iniciais: Dict[str, Any]
     base = {
         "frente_min_m": float(params_iniciais.get("frente_min_m", plano.frente_min_m)),
         "prof_min_m": float(params_iniciais.get("prof_min_m", plano.prof_min_m)),
+
         "larg_rua_vert_m": float(
             params_iniciais.get("larg_rua_vert_m", plano.larg_rua_vert_m)
         ),
@@ -227,24 +296,53 @@ def _merge_plan_params(plano: ParcelamentoPlano, params_iniciais: Dict[str, Any]
             params_iniciais.get("compr_max_quarteirao_m",
                                 plano.compr_max_quarteirao_m)
         ),
+
         "orientacao_graus": params_iniciais.get(
             "orientacao_graus",
             float(plano.orientacao_graus) if plano.orientacao_graus is not None else None,
         ),
+
+        # 1) COMO DECIDE A DIREÇÃO DOS QUARTEIRÕES:
+        # - "auto_maior_lado": usa maior eixo da AL
+        # - "usar_orientacao_graus": usa orientacao_graus explicitamente
+        "direcao_quarteiroes": params_iniciais.get(
+            "direcao_quarteiroes",
+            getattr(plano, "direcao_quarteiroes", "auto_maior_lado"),
+        ),
+
+        # 2) QUAL LADO USAR COMO REFERÊNCIA DO ÂNGULO
+        # - "topo" (padrão)
+        # - "base"
+        # - "esquerda"
+        # - "direita"
+        "lado_ref_quarteiroes": params_iniciais.get(
+            "lado_ref_quarteiroes",
+            getattr(plano, "lado_ref_quarteiroes", "topo"),
+        ),
+
         "srid_calc": int(params_iniciais.get("srid_calc", plano.srid_calc)),
+
         "has_ruas_mask_fc": bool(params_iniciais.get("has_ruas_mask_fc", False)),
         "has_ruas_eixo_fc": bool(params_iniciais.get("has_ruas_eixo_fc", False)),
         "ruas_mask_fc": params_iniciais.get("ruas_mask_fc"),
         "ruas_eixo_fc": params_iniciais.get("ruas_eixo_fc"),
         "guia_linha_fc": params_iniciais.get("guia_linha_fc"),
+
         "dist_min_rua_quarteirao_m": float(
             params_iniciais.get("dist_min_rua_quarteirao_m", 0.0)
         )
         if params_iniciais.get("dist_min_rua_quarteirao_m") is not None
         else None,
+
         "tolerancia_frac": float(params_iniciais.get("tolerancia_frac", 0.05)),
         "calcada_largura_m": float(params_iniciais.get("calcada_largura_m", 2.5)),
+
+        # 🔹 NOVO: força quarteirão nas extremidades (não começar/terminar com rua)
+        "forcar_quarteirao_nas_extremidades": bool(
+            params_iniciais.get("forcar_quarteirao_nas_extremidades", True)
+        ),
     }
+
     return base
 
 
@@ -281,6 +379,8 @@ def _normalize_parametros_ia(parametros: Dict[str, Any], base_params: Dict[str, 
         "dist_min_rua_quarteirao_m",
         "tolerancia_frac",
         "calcada_largura_m",
+        # 🔹 NOVO: deixa a IA ligar/desligar explicitamente se um dia você quiser
+        "forcar_quarteirao_nas_extremidades",
     ]:
         if key in p and p[key] is not None:
             params[key] = p[key]

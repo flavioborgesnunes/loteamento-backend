@@ -77,6 +77,7 @@ INSTALLED_APPS = [
     'restricoes',
     'parcelamento',
     'iaparcelamento',
+    "parcelamento_blocos",
 ]
 
 MIDDLEWARE = [
@@ -210,7 +211,7 @@ OPENAI_API_KEY = config("OPENAI_API_KEY")
 
 IAPARCELAMENTO_RAG_DIR = os.path.join(BASE_DIR, "iaparcelamento_rag")
 
-IAPARCELAMENTO_MODEL = "gpt-4.1-mini" 
+IAPARCELAMENTO_MODEL = "gpt-4.1-mini"
 
 
 SIMPLE_JWT = {

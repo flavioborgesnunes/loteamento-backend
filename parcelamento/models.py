@@ -3,6 +3,7 @@ import uuid
 from django.conf import settings
 from django.contrib.gis.db import models as gis
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
 # SRIDs
@@ -122,40 +123,147 @@ class ParcelamentoPlano(EditableComponent):
     def __str__(self):
         return f"{self.project_id} - {self.nome}"
 
+    DIRECAO_CHOICES = [
+        ("auto_maior_lado", "Automático (maior lado da área loteável)"),
+        ("usar_orientacao_graus", "Usar orientação fixa em graus"),
+    ]
+    LADO_REF_CHOICES = [
+        ("topo", "Lado superior da área loteável"),
+        ("base", "Lado inferior"),
+        ("esquerda", "Lado esquerdo"),
+        ("direita", "Lado direito"),
+    ]
+
+    direcao_quarteiroes = models.CharField(
+        max_length=32,
+        choices=DIRECAO_CHOICES,
+        default="auto_maior_lado",
+        help_text=(
+            "Define como orientar quarteirões: automático (maior lado da AL) "
+            "ou usar um ângulo fixo (orientacao_graus)."
+        ),
+    )
+
+    lado_ref_quarteiroes = models.CharField(
+        max_length=16,
+        choices=LADO_REF_CHOICES,
+        default="topo",
+        help_text=(
+            "Lado de referência da AL para calcular o ângulo. "
+            "Por padrão, segue o ângulo da parte superior ('topo')."
+        ),
+    )
+
 
 class ParcelamentoVersao(EditableComponent):
-    plano = models.ForeignKey(
-        ParcelamentoPlano,
+    # ✅ Sempre ligado a um Project
+    project = models.ForeignKey(
+        "projetos.Project",
         on_delete=models.CASCADE,
-        related_name="versoes",
+        related_name="parcelamento_versoes",
     )
+
+    # ✅ Âncora: qual versão de restrições foi usada como base do parcelamento
+    # (temporariamente nullable para migração segura; depois vamos travar)
+    restricoes = models.ForeignKey(
+        "restricoes.Restricoes",
+        on_delete=models.SET_NULL,  # depois vira PROTECT
+        null=True,
+        blank=True,
+        related_name="parcelamentos",
+    )
+
+    # ✅ Snapshot da base usada (robustez: reproduz mesmo se restrições mudarem depois)
+    area_loteavel_snapshot = gis.MultiPolygonField(
+        srid=4674, null=True, blank=True)
+
+    # ✅ Número sequencial por projeto (diferencia versões do parcelamento sem confundir com restrições)
+    numero = models.PositiveIntegerField(null=True, blank=True)
+
+    # Plano vira opcional (template/preset)
+    plano = models.ForeignKey(
+        "parcelamento.ParcelamentoPlano",
+        on_delete=models.SET_NULL,
+        related_name="versoes",
+        null=True,
+        blank=True,
+    )
+
+    # --- Gestão de versões / opções ---
+    STATUS_CHOICES = (
+        ("draft", "draft"),
+        ("candidate", "candidate"),
+        ("final", "final"),
+    )
+    status = models.CharField(
+        max_length=16, choices=STATUS_CHOICES, default="draft")
+
+    parent = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="children",
+        help_text="Versão pai (para opções A/B/C).",
+    )
+    label = models.CharField(max_length=120, blank=True, default="")
+
+    # --- Referência geométrica do parcelamento ---
+    linha_base = gis.LineStringField(srid=SRID_WGS84, null=True, blank=True)
+
+    # “topo+esquerda” => Norte/Oeste
+    preferencia_cardinal = models.CharField(
+        max_length=4,
+        default="NW",
+        help_text="Preferência cardinal, ex: 'NW' (Norte/Oeste).",
+    )
+
+    # --- Snapshot de parâmetros (inclui calçadas e fileiras) ---
+    fileiras = models.SmallIntegerField(default=1)  # 1 ou 2
+    calcada_largura_m = models.DecimalField(
+        max_digits=8, decimal_places=2, default=2.50)
+    calcada_encosta_aoi = models.BooleanField(default=False)
+
     is_oficial = models.BooleanField(default=False)
     nota = models.TextField(blank=True, default="")
 
-    # snapshot de parâmetros
+    # parâmetros snapshot
     frente_min_m = models.DecimalField(max_digits=8, decimal_places=2)
     prof_min_m = models.DecimalField(max_digits=8, decimal_places=2)
     larg_rua_vert_m = models.DecimalField(max_digits=8, decimal_places=2)
     larg_rua_horiz_m = models.DecimalField(max_digits=8, decimal_places=2)
     compr_max_quarteirao_m = models.DecimalField(
-        max_digits=8, decimal_places=2
-    )
+        max_digits=8, decimal_places=2)
     orientacao_graus = models.DecimalField(
-        max_digits=6, decimal_places=2, null=True, blank=True
-    )
+        max_digits=6, decimal_places=2, null=True, blank=True)
     srid_calc = models.IntegerField(default=3857)
     created_at = models.DateTimeField(default=timezone.now)
 
-    # Exemplo de campo para guardar o "comando" de IA que gerou esta versão
+    # --- Estado incremental ---
+    step_index = models.IntegerField(default=0)
+    cursor_state = models.JSONField(default=dict, blank=True)
+    debug_last = models.JSONField(default=dict, blank=True)
+
     ia_comando_gerador = models.TextField(
         blank=True,
         default="",
-        help_text="Comando ou descrição em linguagem natural usado para gerar esta versão",
+        help_text="Comando/descrição usado para gerar esta versão",
     )
 
-    def __str__(self):
-        return f"Versão {self.id} do plano {self.plano_id}"
+    class Meta:
+        constraints = [
+            # Unicidade do número dentro do projeto (mas permite NULL durante migração)
+            models.UniqueConstraint(
+                fields=["project", "numero"],
+                condition=Q(numero__isnull=False),
+                name="uniq_parcelamento_versao_numero_por_project",
+            ),
+        ]
 
+    def __str__(self):
+        base = self.label or (
+            f"Parcelamento #{self.numero}" if self.numero else f"Versão {self.pk}")
+        return f"{base} ({self.status})"
 
 # ------------------------------------------------------------------------------
 # Vias

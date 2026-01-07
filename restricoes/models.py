@@ -1,31 +1,44 @@
 from __future__ import annotations
+
 from django.conf import settings
-from django.contrib.gis.db import models
+from django.contrib.gis.db import models as gis
 from django.contrib.postgres.indexes import GistIndex
+from django.db import models
 
 SRID_WGS = 4674  # SIRGAS2000
 
+
 class Restricoes(models.Model):
-    project = models.ForeignKey("projetos.Project", on_delete=models.CASCADE, related_name="restricoes_versions")
-    version = models.PositiveIntegerField(editable=False)
-    aoi_snapshot = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
+    project = models.ForeignKey(
+        "projetos.Project",
+        on_delete=models.CASCADE,
+        related_name="restricoes",
+    )
+    version = models.PositiveIntegerField(default=1)
+    aoi_snapshot = gis.MultiPolygonField(
+        srid=SRID_WGS, null=True, blank=True)
 
     label = models.CharField(max_length=120, blank=True, default="")
     notes = models.TextField(blank=True, default="")
     percent_permitido = models.FloatField(null=True, blank=True)
     corte_pct_cache = models.FloatField(null=True, blank=True)
 
-    aoi_snapshot   = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
-    area_loteavel  = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
+    area_loteavel = gis.MultiPolygonField(srid=4674, null=True, blank=True)
+
+    is_oficial = models.BooleanField(default=False)
 
     source = models.CharField(max_length=40, default="geoman")
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
 
     class Meta:
         unique_together = (("project", "version"),)
         ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Restricoes(project={self.project_id}, version={self.version}, oficial={self.is_oficial})"
 
     def save(self, *args, **kwargs):
         if not self.pk and not self.version:
@@ -41,27 +54,35 @@ class Restricoes(models.Model):
 
 
 class AreaVerdeV(models.Model):
-    restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="areas_verdes")
-    geom = models.MultiPolygonField(srid=SRID_WGS)
+    restricoes = models.ForeignKey(
+        Restricoes, on_delete=models.CASCADE, related_name="areas_verdes")
+    geom = gis.MultiPolygonField(srid=SRID_WGS)
     created_at = models.DateTimeField(auto_now_add=True)
+
     class Meta:
-        indexes = [models.Index(fields=["restricoes"]), GistIndex(fields=["geom"])]
+        indexes = [models.Index(fields=["restricoes"]),
+                   GistIndex(fields=["geom"])]
 
 
 class CorteAreaVerdeV(models.Model):
-    restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="cortes_av")
-    geom = models.MultiPolygonField(srid=SRID_WGS)
+    restricoes = models.ForeignKey(
+        Restricoes, on_delete=models.CASCADE, related_name="cortes_av")
+    geom = gis.MultiPolygonField(srid=SRID_WGS)
     created_at = models.DateTimeField(auto_now_add=True)
+
     class Meta:
-        indexes = [models.Index(fields=["restricoes"]), GistIndex(fields=["geom"])]
+        indexes = [models.Index(fields=["restricoes"]),
+                   GistIndex(fields=["geom"])]
 
 
 class RuaV(models.Model):
-    restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="ruas")
-    eixo = models.MultiLineStringField(srid=SRID_WGS)
+    restricoes = models.ForeignKey(
+        Restricoes, on_delete=models.CASCADE, related_name="ruas")
+    eixo = gis.MultiLineStringField(srid=SRID_WGS)
     largura_m = models.FloatField(default=12.0)
-    mask = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
+    mask = gis.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
     class Meta:
         indexes = [
             models.Index(fields=["restricoes"]),
@@ -71,11 +92,13 @@ class RuaV(models.Model):
 
 
 class MargemRioV(models.Model):
-    restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="margens_rio")
-    centerline = models.MultiLineStringField(srid=SRID_WGS)
+    restricoes = models.ForeignKey(
+        Restricoes, on_delete=models.CASCADE, related_name="margens_rio")
+    centerline = gis.MultiLineStringField(srid=SRID_WGS)
     margem_m = models.FloatField(default=30.0)
-    faixa = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
+    faixa = gis.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
     class Meta:
         indexes = [
             models.Index(fields=["restricoes"]),
@@ -85,11 +108,13 @@ class MargemRioV(models.Model):
 
 
 class MargemLTV(models.Model):
-    restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="margens_lt")
-    centerline = models.MultiLineStringField(srid=SRID_WGS)
+    restricoes = models.ForeignKey(
+        Restricoes, on_delete=models.CASCADE, related_name="margens_lt")
+    centerline = gis.MultiLineStringField(srid=SRID_WGS)
     margem_m = models.FloatField(default=15.0)
-    faixa = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
+    faixa = gis.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
     class Meta:
         indexes = [
             models.Index(fields=["restricoes"]),
@@ -99,11 +124,13 @@ class MargemLTV(models.Model):
 
 
 class MargemFerroviaV(models.Model):
-    restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="margens_ferrovia")
-    centerline = models.MultiLineStringField(srid=SRID_WGS)
+    restricoes = models.ForeignKey(
+        Restricoes, on_delete=models.CASCADE, related_name="margens_ferrovia")
+    centerline = gis.MultiLineStringField(srid=SRID_WGS)
     margem_m = models.FloatField(default=20.0)
-    faixa = models.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
+    faixa = gis.MultiPolygonField(srid=SRID_WGS, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
     class Meta:
         indexes = [
             models.Index(fields=["restricoes"]),
@@ -114,9 +141,10 @@ class MargemFerroviaV(models.Model):
 
 # NOVO: Restrições manuais (polígonos desenhados ou círculos convertidos para polígono)
 class ManualRestricaoV(models.Model):
-    restricoes = models.ForeignKey(Restricoes, on_delete=models.CASCADE, related_name="restricoes_manuais")
+    restricoes = models.ForeignKey(
+        Restricoes, on_delete=models.CASCADE, related_name="restricoes_manuais")
     name = models.CharField(max_length=120, blank=True, default="")
-    geom = models.MultiPolygonField(srid=SRID_WGS)
+    geom = gis.MultiPolygonField(srid=SRID_WGS)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

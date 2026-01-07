@@ -3,6 +3,7 @@ from geodata import views as geodata_views
 from ia import views as ia_views
 from iaparcelamento import views as ia_parcelamento_views
 from parcelamento.views import PlanoViewSet, VersaoViewSet
+from parcelamento_blocos import views as blocos_views
 # Projetos (funções avulsas)
 from projetos.views import (exportar_projeto, list_projects,
                             project_features_geojson, project_map_summary,
@@ -13,6 +14,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 # ViewSets do app restricoes
 from restricoes import views as restricoes_views
 from rios import views as rios_views
+from urbanismo import views as urbanismo_views
 # Apps existentes
 from userauth import views as userauths_views
 
@@ -113,6 +115,18 @@ urlpatterns = [
          plano_material, name="parcelamento-planos-materializar"),
     path("parcelamento/planos/<int:pk>/recalcular/", plano_recalcular,
          name="parcelamento-planos-recalcular"),
+
+    # Parcelamento por blocos (quarteirão + lotes, sem ruas)
+    path(
+        "parcelamento-blocos/preview/",
+        blocos_views.QuarteiraoLotesPreviewView.as_view(),
+        name="parcelamento-blocos-preview",
+    ),
+
+    # Urbanismo
+
+    path("roads/preview/", urbanismo_views.RoadsPreviewView.as_view(),
+         name="roads-preview"),
 
     # Versões
     path("parcelamento/versoes/", versao_list,
