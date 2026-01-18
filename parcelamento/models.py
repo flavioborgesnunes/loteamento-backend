@@ -387,13 +387,23 @@ class Calcada(EditableComponent):
         on_delete=models.CASCADE,
         related_name="calcadas",
     )
-    geom = gis.MultiPolygonField(srid=SRID_WGS84)
-    largura_m = models.DecimalField(
-        max_digits=8, decimal_places=2, default=2.50
+
+    # ✅ NOVO: vincular calçada à via
+    via = models.ForeignKey(
+        Via,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="calcadas",
+        help_text="Via à qual esta calçada pertence (lado esq/dir vai em ia_metadata/properties).",
     )
 
+    geom = gis.MultiPolygonField(srid=SRID_WGS84)
+    largura_m = models.DecimalField(
+        max_digits=8, decimal_places=2, default=2.50)
+
     def __str__(self):
-        return f"Calcada v{self.versao_id}"
+        return f"Calcada v{self.versao_id} (via={self.via_id})"
 
 
 # ------------------------------------------------------------------------------
@@ -424,3 +434,23 @@ class AreaPublica(EditableComponent):
     def __str__(self):
         base = self.nome or f"Área pública {self.id}"
         return f"{base} ({self.get_tipo_display()})"
+
+
+# ------------------------------------------------------------------------------
+# Áreas vazias
+# ------------------------------------------------------------------------------
+
+
+class AreaVazia(EditableComponent):
+    versao = models.ForeignKey(
+        ParcelamentoVersao,
+        on_delete=models.CASCADE,
+        related_name="areas_vazias",
+    )
+    geom = gis.MultiPolygonField(srid=SRID_WGS84)
+
+    # opcional: motivo/score de “irregular”
+    motivo = models.CharField(max_length=80, blank=True, default="")
+
+    def __str__(self):
+        return f"Área vazia {self.id} (versão {self.versao_id})"

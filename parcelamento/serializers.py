@@ -1,8 +1,8 @@
 from django.contrib.gis.geos import GEOSGeometry
 from rest_framework import serializers
 
-from .models import (Calcada, Lote, ParcelamentoPlano, ParcelamentoVersao,
-                     Quarteirao, Via)
+from .models import (AreaVazia, Calcada, Lote, ParcelamentoPlano,
+                     ParcelamentoVersao, Quarteirao, Via)
 
 
 class ParametrosSerializer(serializers.Serializer):
@@ -77,7 +77,15 @@ class CalcadaSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Calcada
-        fields = ("id", "versao", "geom", "largura_m")
+        fields = ("id", "versao", "via", "geom", "largura_m")
+
+
+class AreaVaziaSerializer(serializers.ModelSerializer):
+    geom = serializers.JSONField()
+
+    class Meta:
+        model = AreaVazia
+        fields = ("id", "versao", "geom", "motivo")
 
 # Payloads de API
 
@@ -91,12 +99,12 @@ class PreviewRequestSerializer(serializers.Serializer):
 
 
 class PreviewResponseSerializer(serializers.Serializer):
-    vias = serializers.JSONField()            # FC (linhas - eixos)
-    # FC (polígonos - áreas cinza SEM calçada)
+    vias = serializers.JSONField()
     vias_area = serializers.JSONField()
-    quarteiroes = serializers.JSONField()     # FC (polígonos)
-    lotes = serializers.JSONField()           # FC (polígonos com props)
-    calcadas = serializers.JSONField()        # FC (polígonos - faixa exclusiva)
+    quarteiroes = serializers.JSONField()
+    lotes = serializers.JSONField()
+    calcadas = serializers.JSONField()
+    areas_vazias = serializers.JSONField()
     metrics = serializers.DictField()
 
 
